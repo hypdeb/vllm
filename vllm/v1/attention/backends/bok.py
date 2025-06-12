@@ -1,27 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Attention layer with BOK."""
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Attention layer with FlashInfer."""
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-import numpy as np
 import torch
+from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
+                        BatchPrefillWithPagedKVCacheWrapper,
+                        MultiLevelCascadeAttentionWrapper)
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionMetadata,
-    AttentionType,
-)
+import vllm.envs as envs
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionType)
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-import bok_torch_api
-
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
+from z_hacky_layer_test.utils import identity_rotary_cos_sin
 
 if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+from py_bok import (
+    create_op,
+    forward_inplace,
+    calculate_workspace_size,
+    AttentionLayerDimensions,
+    DeviceDataType,
+    RotaryEmbedding,
+    RotaryScalingType,
+    RotaryPositionalEmbeddingType,
+    PrefixCacheConfiguration,
+    AttentionOp
+)
+
+USING_BOK = True
+
+BOK_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 logger = init_logger(__name__)
 
@@ -32,23 +54,23 @@ class BokAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+        return [64, 128, 256]
 
     @staticmethod
     def get_name() -> str:
-        return "BOK_ATTN_VLLM_V1"
+        return "BOK_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> type["BokAttentionImpl"]:
-        return BokAttentionImpl
+    def get_impl_cls() -> type[BokImpl]:
+        return BokImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return BokAttentionMetadata
+    def get_metadata_cls() -> type[BokMetadata]:
+        return BokMetadata
 
     @staticmethod
-    def get_builder_cls() -> type["BokAttentionMetadataBuilder"]:
-        return BokAttentionMetadataBuilder
+    def get_builder_cls() -> type[BokMetadataBuilder]:
+        return BokMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -57,292 +79,519 @@ class BokAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
 
 @dataclass
-class BokAttentionMetadata:
-    # NOTE(sang): Definition of context_len, query_len, and seq_len.
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ---------------------|
-    #                                   |-- query_len ---|
+class PerLayerParameters:
+    """
+    Currently, Bok backend only support models in which all layers share
+    the same values for the following hyperparameters.
+    """
+
+    window_left: int
+    logits_soft_cap: Optional[float]
+    sm_scale: float
+
+
+def get_per_layer_parameters(
+        vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
+    """
+    Scan all attention layers and determine some hyperparameters
+    to use during `plan`.
+    """
+
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
+    per_layer_params: dict[str, PerLayerParameters] = {}
+
+    for key, layer in layers.items():
+        impl = layer.impl
+        assert isinstance(impl, BokImpl)
+
+        # Infer hyperparameters from the attention layer
+        window_size = impl.sliding_window
+        window_left = window_size[0] if window_size is not None else -1
+        logits_soft_cap = impl.logits_soft_cap
+        sm_scale = impl.scale
+
+        per_layer_params[key] = PerLayerParameters(window_left,
+                                                   logits_soft_cap, sm_scale)
+
+    return per_layer_params
+
+
+def infer_global_hyperparameters(
+        per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
+    """
+    Currently, Bok backend only support models in which all layers share
+    the same values for the following hyperparameters:
+    - `window_left`
+    - `logits_soft_cap`
+    - `sm_scale`
+
+    So this function asserts that all layers share the same values for these
+    hyperparameters and returns the global values.
+    """
+
+    assert len(per_layer_params) > 0, "No attention layers found in the model."
+
+    param_sets = list(per_layer_params.values())
+    global_params = param_sets[0]
+    for params in param_sets:
+        assert params == global_params, (
+            "Bok backend currently only supports models in which all "
+            "layers share the same values for the following hyperparameters: "
+            "`window_left`, `logits_soft_cap`, `sm_scale`.")
+
+    return global_params
+
+
+@dataclass
+class BokMetadata:
 
     num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
+
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
+    # the batch, used to index into subquery. E.g., if the subquery length
+    # is [4, 6], it is [0, 4, 10].
+    qo_indptr: torch.Tensor
+    # An example for paged_kv_indices, paged_kv_indptr:
+    # request 1, page indices [0, 5, 8]
+    # request 2, page indices [1, 6, 7]
+    # request 3, page indices [3, 4]
+    # paged_kv_indices is a concatenation of page indices of all requests:
+    # [0, 5, 8, 1, 6, 7, 3, 4]
+    # paged_kv_indptr is used to index into paged_kv_indices:
+    # [0, 3, 6, 8]
+    # The indptr of the paged kv cache, shape: [batch_size + 1]
+    paged_kv_indptr: torch.Tensor
+    # The page indices of the paged kv cache
+    paged_kv_indices: torch.Tensor
+    # The number of entries in the last page of each request in
+    # the paged kv cache, shape: [batch_size]
+    paged_kv_last_page_len: torch.Tensor
+    # The number of query/output heads
+    num_qo_heads: int
+    # The number of key/value heads
+    num_kv_heads: int
+    # The dimension of the attention heads
+    head_dim: int
+    # Block size of vllm
+    page_size: int
+    # The data type of the paged kv cache
+    data_type: torch.dtype
+    # The data type of the query
+    q_data_type: torch.dtype
+
     slot_mapping: torch.Tensor
 
-    # Optional aot scheduling
-    scheduler_metadata: Optional[torch.Tensor] = None
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None
+    # For handling prefill decode split
+    num_decodes: int
+    num_decode_tokens: int
+    num_prefills: int
+    num_prefill_tokens: int
 
-    # for local attention
-    @dataclass
-    class LocalAttentionMetadata:
-        local_query_start_loc: torch.Tensor
-        local_seqused_k: torch.Tensor
-        local_block_table: torch.Tensor
-        local_max_query_len: int
-        local_max_seq_len: int
-        local_scheduler_metadata: Optional[torch.Tensor]
+    # For cascade attention.
+    use_cascade: bool
+    shared_qo_indptr: Optional[torch.Tensor] = None
+    shared_kv_page_indptr: Optional[torch.Tensor] = None
+    shared_kv_page_indices: Optional[torch.Tensor] = None
+    shared_kv_last_page_len: Optional[torch.Tensor] = None
 
-    local_attn_metadata: Optional[LocalAttentionMetadata] = None
+    prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
+    decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
+    cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
 
+    op: Optional[AttentionOp] = None
+    test_case: Optional[ForwardInplaceTestCase] = None
 
-#
-# Take in `query_start_loc_np` and `seq_lens_np` and break the sequences into
-# local attention blocks, where each block is passed to the attention kernel
-# as an independent local ("virtual") batch item.
-#
-# For example, if are performing a chunked prefill a batch of 3 sequences:
-#   q_seqlens  = [4, 10, 5]
-#   kv_seqlens = [6, 17, 9]
-# Then normally for regular attention we would compute with an attention mask
-#  for batch idx 0 (q_seqlens = 4, kv_seqlens = 6) like:
-#   batch idx: 0 (q_seqlens = 4, kv_seqlens = 6)
-#        k_toks >   0 1 2 3 4 5
-#        q_toks v  _____________
-#               0 | 1 1 1
-#               1 | 1 1 1 1
-#               2 | 1 1 1 1 1
-#               3 | 1 1 1 1 1 1
-#
-# for local attention (with attn_chunk_size = 4) we would compute with an
-#  attention mask like:
-#   batch idx: 0  (q_seqlens = 4, kv_seqlens = 6, attn_chunk_size = 4)
-#        k_toks >   0 1 2 3 4 5
-#        q_toks v  _____________
-#               0 | 1 1 1
-#               1 | 1 1 1 1
-#               2 |         1
-#               3 |         1 1
-#
-# We can simulate this mask using standard flash-attention by breaking the
-#  sequences into local ("virtual") batches, where each local batch item is a
-#  local attention block, so in this case batch idx 0 would be broken up into:
-#
-#   local-batch idx: 0 (q_seqlens = 2, kv_seqlens = 4)  (batch 0)
-#        k_toks >   0 1 2 3
-#        q_toks v  _____________
-#               0 | 1 1 1
-#               1 | 1 1 1 1
-#   local-batch idx: 1 (q_seqlens = 2, kv_seqlens = 2) (batch 0)
-#        k_toks >   4 5
-#        q_toks v  _____________
-#               2 | 1
-#               3 | 1 1
-#
-# e.g. if we have:
-#   attn_chunk_size = 4
-#   query_start_loc_np = [0, 4, 14, 19] (q_seqlens = [4, 10, 5])
-# Then this function would return:
-#                           __b0__  ______b1______  __b2__ < orig batch indices
-#   q_seqlens_local    = [   2,  2,  1,  4,  4,  1,  4,  1]
-#   cu_seqlens_q_local = [0, 4,  6, 10, 14, 18, 19, 23, 24]
-#   seqlens_k_local    = [   4,  2,  4,  4,  4,  1,  4,  1]
-#   block_table_local  : shape[local_virtual_batches, pages_per_local_batch]
-def make_local_attention_virtual_batches(
-    attn_chunk_size: int,
-    query_start_loc_np: np.ndarray,
-    seq_lens_np: np.ndarray,
-    block_table: torch.Tensor,
-    page_size: int = 0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, torch.Tensor]:
-    q_seqlens = query_start_loc_np[1:] - query_start_loc_np[:-1]
-    actual_batch_size = seq_lens_np.shape[0]
+    prefix_cache_configuration: Optional[PrefixCacheConfiguration] = None
+    rotary_embedding: Optional[RotaryEmbedding] = None
+    stream: Optional[torch.cuda.Stream] = None
 
-    # Handle if we are starting in the middle of a local attention block,
-    #  we assume q_seqlens > 0 (for all elements), for each batch idx we compute
-    #  the number of tokens that are not in the first local attention block and
-    #  then we can simply use a cdiv for the rest.
-    # For example if we have:
-    #   attn_chunk_size = 4
-    #   q_seqlens = [4, 10, 5]
-    #   k_seqlens = [6, 17, 9]
-    # Then we would get:
-    #   new_tokens_in_first_block = [2, 1, 4]
-    #   local_blocks = [2, 4, 2]
-    q_tokens_in_first_block = np.minimum(
-        attn_chunk_size - ((seq_lens_np - q_seqlens) % attn_chunk_size), q_seqlens
-    ).astype(np.int32)
-    tokens_in_last_block = attn_chunk_size + (seq_lens_np % -attn_chunk_size)
-    local_blocks = 1 + cdiv(q_seqlens - q_tokens_in_first_block, attn_chunk_size)
+    @property
+    def query_start_loc(self):
+        # The GPUModelRunner expects to be able to access this property.
+        return self.qo_indptr
 
-    # Once we know the number of local blocks we can compute the request spans
-    #  for each batch idx, we can figure out the number of "virtual" requests we
-    #  have to make,
-    # For the above example we would get:
-    #   seqlens_q_local = [2, 2, 1, 4, 4, 1, 4, 1]
-    #
-    # First Get batched arange. (E.g., [2, 4, 2] -> [0, 1, 0, 1, 2, 3, 0, 1])
-    #   (TODO: max a utility to share this code with _prepare_inputs)
-    # arange step 1. [2, 4, 2] -> [2, 6, 8]
-    cu_num_blocks = np.cumsum(local_blocks)
-    virtual_batches = cu_num_blocks[-1]
-    # arange step 2. [2, 6, 8] -> [0, 0, 2, 2, 2, 2, 6, 6]
-    block_offsets = np.repeat(cu_num_blocks - local_blocks, local_blocks)
-    # arange step 3. [0, 1, 0, 1, 2, 3, 0, 1]
-    arange = np.arange(virtual_batches, dtype=np.int32) - block_offsets
-    # also compute reverse arange (i.e. [1, 0, 3, 2, 1, 0, 1, 0])
-    rarange = np.repeat(local_blocks, local_blocks) - arange - 1
-    # Then we can compute the seqlens_q_local, handling the fact that the
-    #  first and last blocks could be partial
-    seqlens_q_local = np.repeat(q_seqlens - q_tokens_in_first_block, local_blocks)
-    # set the first block since this may be a partial block
-    seqlens_q_local[arange == 0] = q_tokens_in_first_block
-    # set the remaining blocks
-    seqlens_q_local[arange > 0] = np.minimum(
-        seqlens_q_local - attn_chunk_size * (arange - 1), attn_chunk_size
-    )[arange > 0]
-
-    # convert from q_seqlens to cu_seqlens_q
-    cu_seqlens_q_local = np.pad(np.cumsum(seqlens_q_local), (1, 0)).astype(np.int32)
-
-    # compute the seqlens_k_local,
-    #  basically a full local attention block for all but the last block in each
-    #  batch
-    # For our example this will be:
-    #   seqlens_k_local = [4, 2, 4, 4, 4, 1, 4, 1]
-    seqlens_k_local = np.full(cu_num_blocks[-1], attn_chunk_size, dtype=np.int32)
-    seqlens_k_local[cu_num_blocks - 1] = tokens_in_last_block
-
-    k_seqstarts_absolute = np.repeat(seq_lens_np, local_blocks) - (
-        rarange * attn_chunk_size + np.repeat(tokens_in_last_block, local_blocks)
-    )
-    # For the example the local attention blocks start at:
-    #                           _b0_  _____b1_____  _b2_
-    #   k_seqstarts_absolute = [0, 4, 4, 8, 12, 16, 4, 8]
-    block_starts = k_seqstarts_absolute // page_size
-    assert attn_chunk_size % page_size == 0, (
-        f"attn_chunk_size {attn_chunk_size} is not "
-        f"divisible by page_size {page_size}"
-    )
-    pages_per_local_batch = attn_chunk_size // page_size
-
-    # Create a block_table for the local attention blocks
-    # For out example if we have a block-table like (assuming page_size=2):
-    #   block_table = [
-    #     [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9],  < batch 0
-    #     [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],  < batch 1
-    #     [20, 21, 22, 23, 24, 25, 26, 27, 28, 29],  < batch 2
-    #   ]
-    # Then for the local batches we would want a block-table like
-    #   block_table_local = [
-    #     [  0,  1 ], < local-batch 0, (batch 0, starting from k[0])
-    #     [  2,  3 ], < local-batch 1, (batch 0, starting from k[4])
-    #     [ 12, 13 ], < local-batch 2, (batch 1, starting from k[4])
-    #     [ 14, 15 ], < local-batch 3, (batch 1, starting from k[8])
-    #     [ 16, 17 ], < local-batch 4, (batch 1, starting from k[12])
-    #     [ 18, 19 ], < local-batch 5, (batch 1, starting from k[16])
-    #     [ 22, 23 ], < local-batch 6, (batch 2, starting from k[4])
-    #     [ 24, 25 ], < local-batch 7, (batch 2, starting from k[8])
-    #   ]
-    block_indices = np.broadcast_to(
-        np.arange(pages_per_local_batch, dtype=np.int32),
-        (virtual_batches, pages_per_local_batch),
-    ) + np.expand_dims(block_starts, axis=1)
-    block_indices = block_indices.flatten().clip(max=block_table.shape[1] - 1)
-    batch_indices = np.repeat(
-        np.arange(actual_batch_size, dtype=np.int32),
-        local_blocks * pages_per_local_batch,
-    )
-    block_table_local = block_table[batch_indices, block_indices].view(
-        virtual_batches, -1
-    )
-
-    return seqlens_q_local, cu_seqlens_q_local, seqlens_k_local, block_table_local
+    def __post_init__(self):
+        # Refer to
+        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
+        supported_head_sizes = BokAttentionBackend.get_supported_head_sizes()
+        if self.head_dim is not None and self.head_dim \
+                not in supported_head_sizes:
+            raise ValueError(
+                f"Only {supported_head_sizes} are supported for head_dim,",
+                f" received {self.head_dim}.")
 
 
-def _get_sliding_window_configs(
-    vllm_config: VllmConfig,
-) -> set[Optional[tuple[int, int]]]:
-    """Get the set of all sliding window configs used in the model."""
-    sliding_window_configs: set[Optional[tuple[int, int]]] = set()
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
-    for layer in layers.values():
-        assert isinstance(layer.impl, BokAttentionImpl)
-        sliding_window_configs.add(layer.impl.sliding_window)
-    return sliding_window_configs
+class BokMetadataBuilder:
 
-
-class BokAttentionMetadataBuilder:
-
-    def __init__(self, runner: "GPUModelRunner"):
-        model_config = runner.model_config
-
+    def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
         self.runner = runner
-        self.num_heads_q = model_config.get_num_attention_heads(runner.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(runner.parallel_config)
-        self.headdim = model_config.get_head_size()
-        self.page_size = self.runner.block_size
+        self._workspace_buffer = None
+        self._prefill_wrapper = None  # Wrapper for prefill/append
+        self._decode_wrapper = None  # Wrapper for decode
+        self._cascade_wrapper = None  # Wrapper for cascade attention
 
-        # Sliding window size to be used with the AOT scheduler will be
-        # populated on first build() call.
-        self.aot_schedule = False
-        self.aot_sliding_window: Optional[tuple[int, int]] = None
+        # Global hyperparameters shared by all attention layers
+        self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
-
-    def reorder_batch(self, input_batch, scheduler_output) -> bool:
-        return False
-
-    def build(
-        self,
-        num_reqs: int,
-        num_actual_tokens: int,
-        max_query_len: int,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-    ):
-        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
-        block_table = self.runner.input_batch.block_table.get_device_tensor()[:num_reqs]
-        slot_mapping = (
-            self.runner.slot_mapping_cpu[:num_actual_tokens]
-            .to(self.runner.device, non_blocking=True)
-            .long()
-        )
-
-        if self.aot_sliding_window is None:
-            self.aot_sliding_window = (-1, -1)
-            # For the AOT scheduler we need the sliding window value to be
-            # constant for all layers to. We have to populate this on the first
-            # build() call so the layers are constructed (cannot populate)
-            # in __init__.
-            if self.aot_schedule:
-                sliding_window_configs = _get_sliding_window_configs(
-                    self.runner.vllm_config
+        self.vllm_config = runner.vllm_config
+        self.kv_cache_spec = kv_cache_spec
+        self.block_table = block_table
+        if USING_BOK:
+            print("here 1", flush=True)
+            from z_hacky_layer_test.test_py_bok import ForwardInplaceTestCase, ContextRequest, GenerationRequest, _sequence_length, _input_sequence_length
+            from z_hacky_layer_test.utils import identity_rotary_cos_sin, generate_constant_attention_input, pack_attention_input
+            self.stream = torch.cuda.current_stream()
+            
+            attention_layer_dimensions = AttentionLayerDimensions()
+            attention_layer_dimensions.numQHeads = 32
+            attention_layer_dimensions.numKVHeads = 4
+            attention_layer_dimensions.headSize = 64    
+            self.test_case = ForwardInplaceTestCase(
+                    num_layers=1,
+                    max_batch_size=64,
+                    max_num_tokens=(1 << 14),
+                    attention_layer_dimensions=attention_layer_dimensions,
+                    rotary_embedding_dim=128,
+                    rotary_embedding_base=10000,
+                    rotary_embedding_max_positions=2048,
+                    max_attention_window_size=(1 << 15),
+                    num_tokens_per_block=32,
+                    max_num_blocks_per_sequence=512,
+                    requests=(ContextRequest(sequence_length=1024),),
+                    output_scaling_factor=1.0,
                 )
-                if len(sliding_window_configs) == 1:
-                    sliding_window_config = sliding_window_configs.pop()
-                    if sliding_window_config is not None:
-                        self.aot_sliding_window = sliding_window_config
-                elif len(sliding_window_configs) > 1:
-                    self.aot_schedule = False
+            print("here 2", flush=True)
+            self.rotary_embedding = RotaryEmbedding()
+            self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
+            self.rotary_embedding.rotaryEmbeddingDim = 128 #TODO: make this configurable
+            self.rotary_embedding.rotaryEmbeddingBase = 10000 #TODO: make this configurable
+            self.rotary_embedding.rotaryEmbeddingScale = 0 #TODO: make this configurable
+            self.rotary_embedding.rotaryEmbeddingMaxPositions = 2048 #TODO: make this configurable   
+            self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE #TODO: make this configurable
 
-        attn_metadata = BokAttentionMetadata(
+            self.prefix_cache_configuration = PrefixCacheConfiguration()
+            self.prefix_cache_configuration.numTokensPerBlock = 32 #TODO: make this configurable
+            self.prefix_cache_configuration.maxNumBlocksPerSequence = (
+                512 #TODO: make this configurable
+            )
+            self.prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3
+
+            fp8_output_scaling = torch.tensor(
+                [1.0], device=torch.device("cuda"), dtype=torch.float32
+            )
+            kv_scale_orig_quant = torch.tensor(
+                [1.0], device=torch.device("cuda"), dtype=torch.float32
+            )
+            kv_scale_quant_orig = torch.tensor(
+                [1.0], device=torch.device("cuda"), dtype=torch.float32
+            )
+            multi_block_semaphores = torch.zeros(
+                self.test_case.max_batch_size * self.test_case.attention_layer_dimensions.numQHeads,
+                device=torch.device("cuda"),
+                dtype=torch.int32,
+            )
+            print("here 3", flush=True)
+            # Create a representation of the fixed parameters of the attention operation.
+            self.op = create_op(
+                inputDataType=DeviceDataType.BF16,
+                outputDataType=DeviceDataType.FP8_E4M3,
+                attentionLayerDimensions=self.test_case.attention_layer_dimensions,
+                rotaryEmbedding=self.rotary_embedding,
+                prefixCacheConfiguration=self.prefix_cache_configuration,
+                qScaling=1.0,
+                maxAttentionWindowSize=self.test_case.max_attention_window_size,
+                cyclicAttentionWindowSize=self.test_case.max_attention_window_size,
+                fp8OutputScaling=fp8_output_scaling,
+                kvScaleOrigQuant=kv_scale_orig_quant,
+                kvScaleQuantOrig=kv_scale_quant_orig,
+                multiBlockSemaphores=multi_block_semaphores,
+            )
+            print("here 4", flush=True)
+    def reorder_batch(self, input_batch: InputBatch,
+                      scheduler_output: SchedulerOutput) -> bool:
+        # We now want to reorder the batch so that the "decode" requests are and
+        # the front and the "prefill" requests are at the using the least amount
+        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
+        # where attention is likely memory-bound and "prefill" to mean requests
+        # where attention is likely compute-bound, TODO(lucas): figure out a
+        # better naming here)
+        decodes = []
+        prefills = []
+        num_decode_tokens = 0
+        num_prefill_tokens = 0
+
+        for i, req_id in enumerate(input_batch.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            # for now treat 1 scheduled token as "decode" even if its not,
+            # we should update this to something like < 8 in the future but
+            # currently the decode run only supports num_tokens = 1
+            if num_tokens == 1:
+                decodes.append(i)
+                num_decode_tokens += num_tokens
+            else:
+                prefills.append(i)
+                num_prefill_tokens += num_tokens
+
+        # We hope that this is fairly minimal since decodes
+        # should be around for a number of iterations so hopefully they are
+        # relatively stationary (and new request are generally appended to the
+        # persistent batch so already should be at the back)
+        # To achieve this we loop over the decodes in descending order and
+        # the prefills in ascending order. We swap decodes from the  "back"
+        # i.e. past where the last decode should be in the reodorered with
+        # prefills from the front of the batch.
+        # `decodes` and `prefills` are already in ascending order just based on
+        # the above loop
+        num_decodes = len(decodes)
+        num_prefills = len(prefills)
+        modified_batch = False
+
+        for i in range(1, min(num_decodes, num_prefills) + 1):
+            # If the decode is at the "back" of the batch, i, we can swap it
+            # with the prefill closest to the front of the batch
+            decode_idx = decodes[num_decodes - i]
+            if decode_idx < num_decodes:
+                break
+
+            input_batch.swap_states(prefills[i - 1], decode_idx)
+            modified_batch = True
+
+        # Save for next `build` call
+        # TODO(lucas): this is a bit of a hack, we should probably have a
+        # better way of doing this
+        self._num_decodes = num_decodes
+        self._num_prefills = num_prefills
+        self._num_decode_tokens = num_decode_tokens
+        self._num_prefill_tokens = num_prefill_tokens
+
+        return modified_batch
+
+    def _get_workspace_buffer(self):
+        if self._workspace_buffer is None:
+            self._workspace_buffer = torch.empty(
+                BOK_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=self.runner.device)
+        return self._workspace_buffer
+
+    def _get_prefill_wrapper(self):
+        if self._prefill_wrapper is None:
+            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(), "NHD")
+        return self._prefill_wrapper
+
+    def _get_decode_wrapper(self):
+        if self._decode_wrapper is None:
+            num_qo_heads = (self.runner.model_config.get_num_attention_heads(
+                self.runner.parallel_config))
+            num_kv_heads = self.runner.model_config.get_num_kv_heads(
+                self.runner.parallel_config)
+            use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
+                num_qo_heads // num_kv_heads > 4)
+            self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(),
+                "NHD",
+                use_tensor_cores=use_tensor_cores)
+        return self._decode_wrapper
+
+    def _get_cascade_wrapper(self):
+        if self._cascade_wrapper is None:
+            self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
+                2, self._get_workspace_buffer(), "NHD")
+        return self._cascade_wrapper
+
+    def _plan(self, attn_metadata: BokMetadata):
+        if self.global_hyperparameters is None:
+            self.global_hyperparameters = infer_global_hyperparameters(
+                get_per_layer_parameters(self.vllm_config))
+        if attn_metadata.use_cascade:
+            attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
+            attn_metadata.cascade_wrapper.plan(
+                [attn_metadata.shared_qo_indptr, attn_metadata.qo_indptr],
+                [
+                    attn_metadata.shared_kv_page_indptr,
+                    attn_metadata.paged_kv_indptr
+                ],
+                [
+                    attn_metadata.shared_kv_page_indices,
+                    attn_metadata.paged_kv_indices
+                ],
+                [
+                    attn_metadata.shared_kv_last_page_len,
+                    attn_metadata.paged_kv_last_page_len
+                ],
+                attn_metadata.num_qo_heads,
+                attn_metadata.num_kv_heads,
+                attn_metadata.head_dim,
+                attn_metadata.page_size,
+                causal=True,
+                sm_scale=self.global_hyperparameters.sm_scale,
+                window_left=self.global_hyperparameters.window_left,
+                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+                q_data_type=attn_metadata.q_data_type,
+            )
+        else:
+            # Regular attention (common case).
+            # Decodes are at the front and prefills are at the back,
+            # according to reorder_batch()
+            if self._num_prefills > 0:
+                # Decodes are first so prefills start after the last decode
+                prefill_start = self._num_decodes
+                attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
+                assert attn_metadata.qo_indptr[prefill_start:].shape[
+                    0] == self._num_prefills + 1
+                assert attn_metadata.paged_kv_indptr[prefill_start:].shape[
+                    0] == self._num_prefills + 1
+                assert attn_metadata.paged_kv_last_page_len[
+                    prefill_start:].shape[0] == self._num_prefills
+                # Since prefill_wrapper.run() will be called with
+                # query[num_decode_tokens:] we need to adjust the qo_indptr
+                # to be relative to the start of the prefill queries.
+                qo_indptr = attn_metadata.qo_indptr[
+                    prefill_start:] - attn_metadata.qo_indptr[prefill_start]
+                attn_metadata.prefill_wrapper.plan(
+                    qo_indptr,
+                    attn_metadata.paged_kv_indptr[prefill_start:],
+                    attn_metadata.paged_kv_indices,
+                    attn_metadata.paged_kv_last_page_len[prefill_start:],
+                    attn_metadata.num_qo_heads,
+                    attn_metadata.num_kv_heads,
+                    attn_metadata.head_dim,
+                    attn_metadata.page_size,
+                    causal=True,
+                    sm_scale=self.global_hyperparameters.sm_scale,
+                    window_left=self.global_hyperparameters.window_left,
+                    logits_soft_cap=self.global_hyperparameters.
+                    logits_soft_cap,
+                    q_data_type=attn_metadata.q_data_type,
+                    kv_data_type=attn_metadata.data_type,
+                )
+
+            if self._num_decodes > 0:
+                attn_metadata.decode_wrapper = self._get_decode_wrapper()
+                attn_metadata.decode_wrapper.plan(
+                    attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
+                    attn_metadata.paged_kv_indices,
+                    attn_metadata.paged_kv_last_page_len[:self._num_decodes],
+                    attn_metadata.num_qo_heads,
+                    attn_metadata.num_kv_heads,
+                    attn_metadata.head_dim,
+                    attn_metadata.page_size,
+                    # Disable flashinfer's pos encoding and use vllm's rope.
+                    pos_encoding_mode="NONE",
+                    sm_scale=self.global_hyperparameters.sm_scale,
+                    window_left=self.global_hyperparameters.window_left,
+                    logits_soft_cap=self.global_hyperparameters.
+                    logits_soft_cap,
+                    q_data_type=attn_metadata.q_data_type,
+                    kv_data_type=attn_metadata.data_type,
+                )
+
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
+        assert self._num_decodes + self._num_prefills == num_reqs
+        assert (self._num_decode_tokens +
+                self._num_prefill_tokens == num_actual_tokens)
+        page_size = self.kv_cache_spec.block_size
+        device = self.runner.device
+        qo_indptr = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        block_table_tensor = self.block_table.get_device_tensor()[:num_reqs]
+        slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
+            self.runner.device, non_blocking=True).long()
+
+        block_table_bounds = (seq_lens + page_size - 1) // page_size
+
+        use_cascade = common_prefix_len > 0
+        if use_cascade:
+            # Grab the blocks of the shared prefix from the first request.
+            assert common_prefix_len % page_size == 0
+            num_common_kv_blocks = common_prefix_len // page_size
+            shared_qo_indptr = torch.tensor([0, num_actual_tokens],
+                                            dtype=torch.int32,
+                                            device=device)
+            shared_kv_page_indptr = torch.tensor([0, num_common_kv_blocks],
+                                                 dtype=torch.int32,
+                                                 device=device)
+            shared_kv_page_indices = block_table_tensor[
+                0, :num_common_kv_blocks]
+            shared_kv_last_page_len = torch.tensor([page_size],
+                                                   dtype=torch.int32,
+                                                   device=device)
+            # Remove the blocks of the shared prefix from all requests.
+            block_table_tensor = block_table_tensor[:, num_common_kv_blocks:]
+            block_table_bounds -= num_common_kv_blocks
+        else:
+            shared_qo_indptr = None
+            shared_kv_page_indptr = None
+            shared_kv_page_indices = None
+            shared_kv_last_page_len = None
+
+        mask = (torch.arange(block_table_tensor.size(1),
+                             dtype=block_table_tensor.dtype,
+                             device=block_table_tensor.device).unsqueeze(0)
+                < block_table_bounds.unsqueeze(1))
+        paged_kv_indices = block_table_tensor[mask]
+
+        paged_kv_indptr = torch.cat([
+            torch.zeros(1,
+                        dtype=block_table_bounds.dtype,
+                        device=block_table_bounds.device),
+            block_table_bounds.cumsum(dim=0, dtype=torch.int32)
+        ])
+
+        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                             page_size, paged_kv_last_page_len)
+
+        attn_metadata = BokMetadata(
             num_actual_tokens=num_actual_tokens,
-            max_query_len=max_query_len,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            block_table=block_table,
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=self.runner.num_query_heads,
+            num_kv_heads=self.kv_cache_spec.num_kv_heads,
+            head_dim=self.kv_cache_spec.head_size,
+            page_size=page_size,
+            data_type=self.kv_cache_spec.dtype,
+            q_data_type=self.runner.dtype,
             slot_mapping=slot_mapping,
+            num_decodes=self._num_decodes,
+            num_decode_tokens=self._num_decode_tokens,
+            num_prefills=self._num_prefills,
+            num_prefill_tokens=self._num_prefill_tokens,
+            use_cascade=use_cascade,
+            shared_qo_indptr=shared_qo_indptr,
+            shared_kv_page_indptr=shared_kv_page_indptr,
+            shared_kv_page_indices=shared_kv_page_indices,
+            shared_kv_last_page_len=shared_kv_last_page_len,
+            op=self.op,
+            test_case=self.test_case,
+            prefix_cache_configuration=self.prefix_cache_configuration,
+            rotary_embedding=self.rotary_embedding,
+            stream=self.stream,
         )
+
+        self._plan(attn_metadata)
+
         return attn_metadata
 
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        if self.kv_cache_spec.dtype != self.runner.model_config.dtype:
+            # TODO: The cascade wrapper currently does not support setting
+            # kv cache dtype to something different from query dtype.
+            return False
+        return use_cascade_attention(*args, **kwargs)
 
-class BokAttentionImpl(AttentionImpl):
+
+class BokImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -356,8 +605,13 @@ class BokAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in FlashInfer is not supported yet, it will fall"
+                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -370,27 +624,17 @@ class BokAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
-        self.logits_soft_cap = 0
+        self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        support_head_sizes = BokAttentionBackend.get_supported_head_sizes()
-        if head_size not in support_head_sizes:
-            raise ValueError(
-                f"Head size {head_size} is not supported by BOK. "
-                f"Supported head sizes are: {support_head_sizes}. "
-                "Set VLLM_USE_V1=0 to use another attention backend."
-            )
-
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "BOK"
-            )
-        self.use_irope = use_irope
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "FlashInferImpl")
 
     def forward(
         self,
@@ -399,36 +643,256 @@ class BokAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: Optional[BokAttentionMetadata],
+        attn_metadata: BokMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with BOK attention kernels.
+        """Forward pass with FlashInfer.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache = [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
-        NOTE: FP8 quantization, flash-attn expect the size of
-              {q,k,v}_descale to be (num_sequences, num_kv_heads).
-              We use torch's .expand() to avoid duplicating values
         """
+
+        
         assert output is not None, "Output tensor must be provided."
 
-        # Print all the ops defined in torch.ops.xqa
-        xqa_ops = dir(torch.ops.xqa)
-        print("Available ops in torch.ops.xqa:", xqa_ops)
+        if attn_metadata is None:
+            # Profiling run.
+            return output
 
-        # Continue with the original operation
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
 
-        bok_torch_api.fwd_kvcache_xqa(
-            q=query,
-            kcache=kv_cache,
-            vcache=kv_cache,
-            k=key,
-            v=value,
-        )
-        return output
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        if self.kv_sharing_target_layer_name is None:
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+
+        window_left = (self.sliding_window[0]
+                       if self.sliding_window is not None else -1)
+
+        # Inputs and outputs may be padded for CUDA graphs
+        query = query[:num_actual_tokens]
+        output_padded = output
+        output = output[:num_actual_tokens]
+
+        if attn_metadata.use_cascade:
+            # Cascade attention (rare case).
+            assert attn_metadata.cascade_wrapper is not None
+            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
+            return output
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+
+        # Regular attention (common case).
+        # Decodes are at the front and prefills are at the back,
+        # according to reorder_batch()
+        if prefill_wrapper := attn_metadata.prefill_wrapper:
+            prefill_query = query[num_decode_tokens:]
+            assert prefill_query.shape[0] == num_prefill_tokens
+            assert prefill_wrapper is not None
+            assert prefill_wrapper._causal
+            assert prefill_wrapper._window_left == window_left
+            assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
+                                                        or 0.0)
+            assert prefill_wrapper._sm_scale == self.scale
+            prefill_wrapper.run(
+                prefill_query,
+                kv_cache,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                out=output[num_decode_tokens:],
+            )
+
+        if decode_wrapper := attn_metadata.decode_wrapper:
+            decode_query = query[:num_decode_tokens]
+            assert decode_query.shape[0] == num_decode_tokens
+            assert decode_wrapper is not None
+            assert decode_wrapper._window_left == window_left
+            assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
+                                                       or 0.0)
+            assert decode_wrapper._sm_scale == self.scale
+            decode_wrapper.run(
+                decode_query,
+                kv_cache,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                out=output[:num_decode_tokens],
+            )
+
+        if USING_BOK:
+            from z_hacky_layer_test.test_py_bok import ForwardInplaceTestCase, ContextRequest, GenerationRequest, _sequence_length, _input_sequence_length
+            from z_hacky_layer_test.utils import pack_attention_input, generate_constant_attention_input
+
+            # Calculate how much workspace memory is needed for the operation.
+            workspace_size = calculate_workspace_size(
+                attn_metadata.op, attn_metadata.test_case.max_num_tokens, attn_metadata.test_case.max_batch_size
+            )
+            workspace = torch.zeros(
+                workspace_size, device=torch.device("cuda"), dtype=torch.int8
+            )
+            print("here 5", flush=True)
+            q_dimension = (
+                attn_metadata.test_case.attention_layer_dimensions.numQHeads
+                * attn_metadata.test_case.attention_layer_dimensions.headSize
+            )
+
+            sequence_lengths_host = torch.tensor(
+                [_sequence_length(request) for request in attn_metadata.test_case.requests],
+                dtype=torch.int32,
+            )
+
+            # Create a representation of the rotary positional embedding cosine and sine cache.
+            rotary_cos_sin = identity_rotary_cos_sin(attn_metadata.rotary_embedding)
+
+            output_scaling_factor = torch.tensor(
+                [attn_metadata.test_case.output_scaling_factor],
+                device=torch.device("cuda"),
+                dtype=torch.float32,
+            )
+
+            num_blocks_in_kv_cache = (
+                attn_metadata.test_case.max_batch_size * attn_metadata.prefix_cache_configuration.maxNumBlocksPerSequence
+            )
+            actual_kv_cache_pools = [
+                torch.zeros(
+                    num_blocks_in_kv_cache,
+                    2,
+                    attn_metadata.test_case.attention_layer_dimensions.numKVHeads,
+                    attn_metadata.prefix_cache_configuration.numTokensPerBlock,
+                    attn_metadata.test_case.attention_layer_dimensions.headSize,
+                    device=torch.device("cuda"),
+                    dtype=torch.float8_e4m3fn,
+                )
+                for _ in range(attn_metadata.test_case.num_layers)
+            ]
+
+            input_sequence_lengths_host = torch.tensor(
+                [_input_sequence_length(request) for request in attn_metadata.test_case.requests],
+                dtype=torch.int32,
+            )
+            num_tokens = input_sequence_lengths_host.sum().item()
+            sequence_lengths_device = sequence_lengths_host.cuda()
+
+            num_context_requests = sum(
+                isinstance(request, ContextRequest) for request in attn_metadata.test_case.requests
+            )
+            print("here 6", flush=True)
+            # Rough simulation of a realistic workload where the operation would be called for each layer.
+            
+
+            (q, k, v) = generate_constant_attention_input(
+                num_tokens,
+                attn_metadata.test_case.attention_layer_dimensions,
+                DeviceDataType.BF16,
+                1.0,
+            )
+
+            qkv = pack_attention_input(q, k, v)
+
+            # TODO: it will be a bit more complicated here to set the state of the KV-cache correctly.
+            # kv_cache_block_offsets = write_kv_cache_at_contiguous_offsets(
+            #     k.to(torch.float8_e4m3fn),
+            #     v.to(torch.float8_e4m3fn),
+            #     sequence_lengths_device,
+            #     actual_kv_cache_pools[layer_index],
+            #     test_case.max_num_blocks_per_sequence,
+            # )
+            num_sequences = input_sequence_lengths_host.shape[0]
+            num_blocks_required = 2 * num_sequences * attn_metadata.test_case.max_num_blocks_per_sequence
+            kv_cache_block_offsets = torch.arange(
+                num_blocks_required,
+                device=torch.device("cuda"),
+                dtype=torch.int32,
+            ).reshape(num_sequences, 2, attn_metadata.test_case.max_num_blocks_per_sequence)
+
+            # Run the attention operation.
+            output = torch.zeros(
+                num_tokens,
+                q_dimension,
+                device=torch.device("cuda"),
+                dtype=torch.int8,
+            )
+            attn_metadata.stream.synchronize()
+            forward_inplace(
+                attn_metadata.op,
+                qkv,
+                num_context_requests,
+                input_sequence_lengths_host.to(torch.uint32),
+                sequence_lengths_device.to(torch.uint32),
+                sequence_lengths_host.to(torch.uint32),
+                kv_cache_block_offsets.to(torch.uint32),
+                actual_kv_cache_pools[0].data_ptr(),
+                output_scaling_factor,
+                rotary_cos_sin,
+                output,
+                workspace,
+                attn_metadata.stream.cuda_stream,
+            )
+            attn_metadata.stream.synchronize()
+
+        return output_padded
+
+
+@dataclass(frozen=True)
+class ContextRequest:
+    sequence_length: int
+
+
+@dataclass(frozen=True)
+class GenerationRequest:
+    sequence_length: int
+
+
+type Request = ContextRequest | GenerationRequest
+
+
+@dataclass(frozen=True)
+class ForwardInplaceTestCase:
+    num_layers: int
+    max_batch_size: int
+    max_num_tokens: int
+
+    attention_layer_dimensions: AttentionLayerDimensions
+
+    rotary_embedding_dim: int
+    rotary_embedding_base: int
+    rotary_embedding_max_positions: int
+
+    max_attention_window_size: int
+
+    num_tokens_per_block: int
+    max_num_blocks_per_sequence: int
+
+    requests: tuple[Request, ...]
+
+    output_scaling_factor: float
+    

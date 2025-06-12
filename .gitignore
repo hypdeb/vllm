@@ -202,3 +202,13 @@ shellcheck*/
 
 # Ingore moe/marlin_moe gen code
 csrc/moe/marlin_moe_wna16/kernel_*
+
+# Hf token
+token
+gitlab_token
+
+# HF Cache
+tmp/hf_cache/*
+
+
+z_hacky_layer_test/*_attn_captures/*
