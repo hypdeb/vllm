@@ -8,6 +8,92 @@ import numpy as np
 from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.attention.selector import global_force_attn_backend_context_manager, _Backend
+import torch
+
+from py_bok import (
+    create_op,
+    forward_inplace,
+    calculate_workspace_size,
+    AttentionLayerDimensions,
+    DeviceDataType,
+    RotaryEmbedding,
+    RotaryScalingType,
+    RotaryPositionalEmbeddingType,
+    PrefixCacheConfiguration,
+    AttentionOp
+)
+
+class SomeClass:
+    def __init__(self):
+        print("here 1", flush=True)
+        from z_hacky_layer_test.test_py_bok import ForwardInplaceTestCase, ContextRequest, GenerationRequest, _sequence_length, _input_sequence_length
+        from z_hacky_layer_test.utils import identity_rotary_cos_sin, generate_constant_attention_input, pack_attention_input
+        self.stream = torch.cuda.current_stream()
+        attention_layer_dimensions = AttentionLayerDimensions()
+        attention_layer_dimensions.numQHeads = 32
+        attention_layer_dimensions.numKVHeads = 4
+        attention_layer_dimensions.headSize = 64
+        self.test_case = ForwardInplaceTestCase(
+                num_layers=1,
+                max_batch_size=64,
+                max_num_tokens=(1 << 14),
+                attention_layer_dimensions=attention_layer_dimensions,
+                rotary_embedding_dim=128,
+                rotary_embedding_base=10000,
+                rotary_embedding_max_positions=2048,
+                max_attention_window_size=(1 << 15),
+                num_tokens_per_block=32,
+                max_num_blocks_per_sequence=512,
+                requests=(ContextRequest(sequence_length=1024),),
+                output_scaling_factor=1.0,
+            )
+        print("here 2", flush=True)
+        self.rotary_embedding = RotaryEmbedding()
+        self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
+        self.rotary_embedding.rotaryEmbeddingDim = 128 #TODO: make this configurable
+        self.rotary_embedding.rotaryEmbeddingBase = 10000 #TODO: make this configurable
+        self.rotary_embedding.rotaryEmbeddingScale = 0 #TODO: make this configurable
+        self.rotary_embedding.rotaryEmbeddingMaxPositions = 2048 #TODO: make this configurable   
+        self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE #TODO: make this configurable
+
+        self.prefix_cache_configuration = PrefixCacheConfiguration()
+        self.prefix_cache_configuration.numTokensPerBlock = 32 #TODO: make this configurable
+        self.prefix_cache_configuration.maxNumBlocksPerSequence = (
+            512 #TODO: make this configurable
+        )
+        self.prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3
+
+        fp8_output_scaling = torch.tensor(
+            [1.0], device=torch.device("cuda"), dtype=torch.float32
+        )
+        kv_scale_orig_quant = torch.tensor(
+            [1.0], device=torch.device("cuda"), dtype=torch.float32
+        )
+        kv_scale_quant_orig = torch.tensor(
+            [1.0], device=torch.device("cuda"), dtype=torch.float32
+        )
+        multi_block_semaphores = torch.zeros(
+            self.test_case.max_batch_size * self.test_case.attention_layer_dimensions.numQHeads,
+            device=torch.device("cuda"),
+            dtype=torch.int32,
+        )
+        print("here 3", flush=True)
+        # Create a representation of the fixed parameters of the attention operation.
+        self.op = create_op(
+            inputDataType=DeviceDataType.BF16,
+            outputDataType=DeviceDataType.FP8_E4M3,
+            attentionLayerDimensions=self.test_case.attention_layer_dimensions,
+            rotaryEmbedding=self.rotary_embedding,
+            prefixCacheConfiguration=self.prefix_cache_configuration,
+            qScaling=1.0,
+            maxAttentionWindowSize=self.test_case.max_attention_window_size,
+            cyclicAttentionWindowSize=self.test_case.max_attention_window_size,
+            fp8OutputScaling=fp8_output_scaling,
+            kvScaleOrigQuant=kv_scale_orig_quant,
+            kvScaleQuantOrig=kv_scale_quant_orig,
+            multiBlockSemaphores=multi_block_semaphores,
+        )
+        print("here 4", flush=True)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark VLLM model with multiple prompts")
@@ -41,11 +127,17 @@ def main():
     print(f"Iterations: {args.num_iters}")
     print(f"Warmup iterations: {args.num_iters_warmup}")
 
+    # SomeClass()
+
+
     # Initialize model
     llm = LLM(
         model=args.model,
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
+        gpu_memory_utilization = 0.3
+        
+    
     )
     
     sampling_params = SamplingParams(
@@ -88,6 +180,11 @@ def main():
     print(f"\nResults for processing {len(prompts)} prompts:")
     print(f"Average latency: {avg_latency:.4f} seconds")
     print(f"Latency per prompt: {avg_latency / len(prompts):.4f} seconds")
+    print("\nPrompt-Output Pairs:")
+    for i, (prompt, output) in enumerate(zip(prompts, results)):
+        print(f"\nPair {i+1}:")
+        print(f"Prompt: {prompt}")
+        print(f"Output: {output.outputs[0].text}")
     for percentage, percentile in zip(percentages, percentiles):
         print(f"{percentage}% percentile latency: {percentile:.4f} seconds")
     
@@ -108,7 +205,7 @@ def main():
         print(f"Results saved to {args.output_json}")
 
     # Example of a single forward pass with a forced backend
-    if True:
+    if False:
         if hasattr(_Backend, "FLASHINFER"):
             print("\nPerforming an extra forward pass with FLASHINFER backend...")
             with global_force_attn_backend_context_manager(_Backend.FLASHINFER):
