@@ -150,6 +150,11 @@ class BokMetadata:
     op: AttentionOp
     attention_layer_dimensions: AttentionLayerDimensions
     num_prefill_requests: int
+    seq_lens_gpu: torch.Tensor
+    seq_lens_cpu: torch.Tensor
+    output_scaling_factor: torch.Tensor
+    workspace: torch.Tensor
+    rotary_cos_sin: torch.Tensor
 
 class BokMetadataBuilder:
 
@@ -202,11 +207,18 @@ class BokMetadataBuilder:
             runner.num_query_heads * runner.scheduler_config.max_num_seqs, device=torch.device("cuda"), dtype=torch.int32
         )
 
+        #TODO: what this do
+        self.output_scaling_factor = torch.tensor(
+            [1.0],
+            device=torch.device("cuda"),
+            dtype=torch.float32,
+        )
+
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
             inputDataType=DeviceDataType.BF16,
             outputDataType=DeviceDataType.FP8_E4M3,
-            attentionLayerDimensions=attention_layer_dimensions,
+            attentionLayerDimensions=self.attention_layer_dimensions,
             rotaryEmbedding=rotary_positional_embedding,
             prefixCacheConfiguration=prefix_cache_configuration,
             qScaling=1.0,
@@ -217,14 +229,24 @@ class BokMetadataBuilder:
             kvScaleQuantOrig=kv_scale_quant_orig,
             multiBlockSemaphores=multi_block_semaphores,
         )
+        #TODO: check if max_num_seqs == max_batch_size
+        workspace_size = calculate_workspace_size(
+            self.op, self.runner.max_num_tokens, self.runner.scheduler_config.max_num_seqs 
+        )
+
+        self.workspace = torch.zeros(
+            workspace_size, device=torch.device("cuda"), dtype=torch.int8
+        )
+
+        self.rotary_cos_sin = identity_rotary_cos_sin(rotary_positional_embedding)
+
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
         # where attention is likely memory-bound and "prefill" to mean requests
-        # where attention is likely compute-bound, TODO(lucas): figure out a
-        # better naming here)
+        # where attention is likely compute-bound
         decodes = []
         prefills = []
         num_decode_tokens = 0
@@ -266,9 +288,7 @@ class BokMetadataBuilder:
             input_batch.swap_states(prefills[i - 1], decode_idx)
             modified_batch = True
 
-        # Save for next `build` call
-        # TODO(lucas): this is a bit of a hack, we should probably have a
-        # better way of doing this
+
         self._num_decode_requests = num_decodes
         self._num_prefill_requests = num_prefills
         self._num_decode_tokens = num_decode_tokens
@@ -284,12 +304,18 @@ class BokMetadataBuilder:
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
 
+        seq_lens_gpu = common_attn_metadata.seq_lens
+        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
 
         attn_metadata = BokMetadata(
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
             num_prefill_requests=self._num_prefill_requests,
-
+            seq_lens_gpu=seq_lens_gpu,
+            seq_lens_cpu=seq_lens_cpu,
+            output_scaling_factor=self.output_scaling_factor,
+            workspace=self.workspace,
+            rotary_cos_sin=self.rotary_cos_sin,
         )
 
 
@@ -366,21 +392,62 @@ class BokImpl(AttentionImpl):
 
         # Reshape to [num_tokens, (num_heads + 2*num_kv_heads)*head_size]
         qkv = torch.cat([query_flattened, key_flattened, value_flattened], dim=-1)
-        
+
+
         forward_inplace(
             attn_metadata.op,
             qkv,
             numContextRequests=attn_metadata.num_prefill_requests,
-            inputSequenceLengthsHost=input_sequence_lengths_host.to(torch.uint32),
-            inputSequenceLengthsDevice=input_sequence_lengths_device.to(torch.uint32),
-            sequenceLengthsDevice=sequence_lengths_device.to(torch.uint32),
-            sequenceLengthsHost=sequence_lengths_host.to(torch.uint32),
+            #TODO: see how to get actual input seqlens
+            #TODO: see how to skip / workaround the uint cast
+            inputSequenceLengthsHost=attn_metadata.seq_lens_cpu.to(torch.uint32),
+            inputSequenceLengthsDevice=attn_metadata.seq_lens_gpu.to(torch.uint32),
+            sequenceLengthsDevice=attn_metadata.seq_lens_gpu.to(torch.uint32),
+            sequenceLengthsHost=attn_metadata.seq_lens_cpu.to(torch.uint32),
             kvCacheBlockOffsets=kv_cache_block_offsets.to(torch.uint32),
             kvCachePoolPtr=actual_kv_cache_pools[layer_index].data_ptr(),
-            outputScalingFactor=output_scaling_factor,
-            rotaryCosSin=rotary_cos_sin,
+            outputScalingFactor=attn_metadata.output_scaling_factor,
+            rotaryCosSin=attn_metadata.rotary_cos_sin,
             output=output,
-            workspace=workspace,
-            stream=stream.cuda_stream,
+            workspace=attn_metadata.workspace,
+            stream=torch.cuda.current_stream().cuda_stream,
         )
         return output_padded
+
+
+
+
+#TODO: delete this?
+def identity_rotary_cos_sin(
+    rotary_embedding_parameters: RotaryEmbedding,
+) -> torch.Tensor:
+    """
+    Creates a rotary positional embedding cosine and sine cache for a given rotary embedding, where
+    all the cosine values are ones and all the sine values are zero,
+    which should create an identity embedding, i.e. an embedding that does nothing.
+    """
+
+    # One vector of ones for the cos values.
+    cos_values = torch.ones(
+        rotary_embedding_parameters.rotaryEmbeddingMaxPositions,
+        rotary_embedding_parameters.rotaryEmbeddingDim,
+        device=torch.device("cuda"),
+        dtype=torch.float32,
+    )
+
+    # One vector of zeros for the sin values.
+    sin_values = torch.zeros(
+        rotary_embedding_parameters.rotaryEmbeddingMaxPositions,
+        rotary_embedding_parameters.rotaryEmbeddingDim,
+        device=torch.device("cuda"),
+        dtype=torch.float32,
+    )
+
+    # Stack them together to get the cos and sin values for each position.
+    result = torch.stack([cos_values, sin_values], dim=2)
+    assert result.shape == (
+        rotary_embedding_parameters.rotaryEmbeddingMaxPositions,
+        rotary_embedding_parameters.rotaryEmbeddingDim,
+        2,
+    )
+    return result
