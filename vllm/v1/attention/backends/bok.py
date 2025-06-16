@@ -149,7 +149,7 @@ def infer_global_hyperparameters(
 class BokMetadata:
     op: AttentionOp
     attention_layer_dimensions: AttentionLayerDimensions
-
+    num_prefill_requests: int
 
 class BokMetadataBuilder:
 
@@ -269,8 +269,8 @@ class BokMetadataBuilder:
         # Save for next `build` call
         # TODO(lucas): this is a bit of a hack, we should probably have a
         # better way of doing this
-        self._num_decodes = num_decodes
-        self._num_prefills = num_prefills
+        self._num_decode_requests = num_decodes
+        self._num_prefill_requests = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
 
@@ -280,76 +280,20 @@ class BokMetadataBuilder:
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
-        assert self._num_decodes + self._num_prefills == num_reqs
+        assert self._num_decode_requests + self._num_prefill_requests == num_reqs
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
-        page_size = self.kv_cache_spec.block_size
-        device = self.runner.device
-        qo_indptr = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
-        block_table_tensor = self.block_table.get_device_tensor()[:num_reqs]
-        slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True).long()
 
-        block_table_bounds = (seq_lens + page_size - 1) // page_size
-
-        use_cascade = common_prefix_len > 0
-        if use_cascade:
-            # Grab the blocks of the shared prefix from the first request.
-            assert common_prefix_len % page_size == 0
-            num_common_kv_blocks = common_prefix_len // page_size
-            shared_qo_indptr = torch.tensor([0, num_actual_tokens],
-                                            dtype=torch.int32,
-                                            device=device)
-            shared_kv_page_indptr = torch.tensor([0, num_common_kv_blocks],
-                                                 dtype=torch.int32,
-                                                 device=device)
-            shared_kv_page_indices = block_table_tensor[
-                0, :num_common_kv_blocks]
-            shared_kv_last_page_len = torch.tensor([page_size],
-                                                   dtype=torch.int32,
-                                                   device=device)
-            # Remove the blocks of the shared prefix from all requests.
-            block_table_tensor = block_table_tensor[:, num_common_kv_blocks:]
-            block_table_bounds -= num_common_kv_blocks
-        else:
-            shared_qo_indptr = None
-            shared_kv_page_indptr = None
-            shared_kv_page_indices = None
-            shared_kv_last_page_len = None
-
-        mask = (torch.arange(block_table_tensor.size(1),
-                             dtype=block_table_tensor.dtype,
-                             device=block_table_tensor.device).unsqueeze(0)
-                < block_table_bounds.unsqueeze(1))
-        paged_kv_indices = block_table_tensor[mask]
-
-        paged_kv_indptr = torch.cat([
-            torch.zeros(1,
-                        dtype=block_table_bounds.dtype,
-                        device=block_table_bounds.device),
-            block_table_bounds.cumsum(dim=0, dtype=torch.int32)
-        ])
-
-        paged_kv_last_page_len = seq_lens % page_size
-        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
-                                             page_size, paged_kv_last_page_len)
 
         attn_metadata = BokMetadata(
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
-            
+            num_prefill_requests=self._num_prefill_requests,
+
         )
 
 
         return attn_metadata
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        if self.kv_cache_spec.dtype != self.runner.model_config.dtype:
-            # TODO: The cascade wrapper currently does not support setting
-            # kv cache dtype to something different from query dtype.
-            return False
-        return use_cascade_attention(*args, **kwargs)
 
 
 class BokImpl(AttentionImpl):
@@ -426,18 +370,17 @@ class BokImpl(AttentionImpl):
         forward_inplace(
             attn_metadata.op,
             qkv,
-            kv_cache,
-            num_context_requests,
-            input_sequence_lengths_host.to(torch.uint32),
-            input_sequence_lengths_device.to(torch.uint32),
-            sequence_lengths_device.to(torch.uint32),
-            sequence_lengths_host.to(torch.uint32),
-            kv_cache_block_offsets.to(torch.uint32),
-            actual_kv_cache_pools[layer_index].data_ptr(),
-            output_scaling_factor,
-            rotary_cos_sin,
-            output,
-            workspace,
-            stream.cuda_stream,
+            numContextRequests=attn_metadata.num_prefill_requests,
+            inputSequenceLengthsHost=input_sequence_lengths_host.to(torch.uint32),
+            inputSequenceLengthsDevice=input_sequence_lengths_device.to(torch.uint32),
+            sequenceLengthsDevice=sequence_lengths_device.to(torch.uint32),
+            sequenceLengthsHost=sequence_lengths_host.to(torch.uint32),
+            kvCacheBlockOffsets=kv_cache_block_offsets.to(torch.uint32),
+            kvCachePoolPtr=actual_kv_cache_pools[layer_index].data_ptr(),
+            outputScalingFactor=output_scaling_factor,
+            rotaryCosSin=rotary_cos_sin,
+            output=output,
+            workspace=workspace,
+            stream=stream.cuda_stream,
         )
         return output_padded
