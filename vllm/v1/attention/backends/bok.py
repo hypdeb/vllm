@@ -155,6 +155,8 @@ class BokMetadata:
     output_scaling_factor: torch.Tensor
     workspace: torch.Tensor
     rotary_cos_sin: torch.Tensor
+    block_table: BlockTable
+    num_reqs: int
 
 class BokMetadataBuilder:
 
@@ -183,10 +185,10 @@ class BokMetadataBuilder:
         rotary_positional_embedding.rotaryScalingType = RotaryScalingType.NONE
         
         prefix_cache_configuration = PrefixCacheConfiguration()
-        prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3
-        prefix_cache_configuration.numTokensPerBlock = 32 # TODO: find exact value.
+        prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3 #TODO: needs to take actual dtype
+        prefix_cache_configuration.numTokensPerBlock = kv_cache_spec.block_size # TODO: check correctness
         prefix_cache_configuration.maxNumBlocksPerSequence = (
-            1024 # TODO: find exact value.
+            block_table.max_num_blocks_per_req # TODO: check correctness
         )
 
         max_attention_window_size = runner.vllm_config.model_config.max_model_len
@@ -203,6 +205,8 @@ class BokMetadataBuilder:
         kv_scale_quant_orig = torch.tensor(
             [1.0], device=torch.device("cuda"), dtype=torch.float32
         )
+
+        #TODO: check if max_num_seqs == max_batch_size
         multi_block_semaphores = torch.zeros(
             runner.num_query_heads * runner.scheduler_config.max_num_seqs, device=torch.device("cuda"), dtype=torch.int32
         )
@@ -316,6 +320,8 @@ class BokMetadataBuilder:
             output_scaling_factor=self.output_scaling_factor,
             workspace=self.workspace,
             rotary_cos_sin=self.rotary_cos_sin,
+            block_table=self.block_table,
+            num_reqs=num_reqs,
         )
 
 
@@ -393,6 +399,13 @@ class BokImpl(AttentionImpl):
         # Reshape to [num_tokens, (num_heads + 2*num_kv_heads)*head_size]
         qkv = torch.cat([query_flattened, key_flattened, value_flattened], dim=-1)
 
+        vanilla_block_table = attn_metadata.block_table.block_table
+
+        k_offsets = vanilla_block_table*2
+        v_offsets = vanilla_block_table*2 + 1
+        kv_cache_block_offsets = torch.stack([k_offsets, v_offsets], dim=0)
+        kv_cache_block_offsets = kv_cache_block_offsets.view((attn_metadata.num_reqs, 2, attn_metadata.block_table.max_num_blocks_per_req))
+
 
         forward_inplace(
             attn_metadata.op,
@@ -405,14 +418,14 @@ class BokImpl(AttentionImpl):
             sequenceLengthsDevice=attn_metadata.seq_lens_gpu.to(torch.uint32),
             sequenceLengthsHost=attn_metadata.seq_lens_cpu.to(torch.uint32),
             kvCacheBlockOffsets=kv_cache_block_offsets.to(torch.uint32),
-            kvCachePoolPtr=actual_kv_cache_pools[layer_index].data_ptr(),
+            kvCachePoolPtr=kv_cache.data_ptr(),
             outputScalingFactor=attn_metadata.output_scaling_factor,
             rotaryCosSin=attn_metadata.rotary_cos_sin,
             output=output,
             workspace=attn_metadata.workspace,
             stream=torch.cuda.current_stream().cuda_stream,
         )
-        return output_padded
+        return output
 
 
 
