@@ -24,10 +24,13 @@ build-vllm-image:
 	$(call add_local_user,flashinfer_vllm_dev:7204195724929729558)
 
 vllm-setup:
+	git clone hypdeb/vllm
+	git checkout dan_branch
 	VLLM_USE_PRECOMPILED=1 pip install --editable .
-	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git" --force-reinstall --no-input
 	pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
+force-reinstall-bok:
+	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git" --force-reinstall --no-input
 run-vllm:
 	docker run -it --gpus all \
 		-v $(shell pwd):$(shell pwd) \
@@ -43,14 +46,17 @@ run-vllm:
 		myimage-dblanaru 
 
 build-flashinfer-wheel:
-	export FLASHINFER_ENABLE_AOT=1
-	export TORCH_CUDA_ARCH_LIST='9.0+PTX'
-	cd 3rdparty
-	git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-	cd flashinfer
-	git checkout v0.2.5 --recurse-submodules
-	rm -rf build
-	python3 setup.py bdist_wheel --dist-dir=dist --verbose
+	export FLASHINFER_ENABLE_AOT=1; \
+	export TORCH_CUDA_ARCH_LIST='9.0+PTX'; \
+	cd 3rdparty; \
+	rm -rf flashinfer; \
+	git clone https://github.com/flashinfer-ai/flashinfer.git --recursive; \
+	cd flashinfer; \
+	git checkout v0.2.6.post1 --recurse-submodules; \
+	pip install --no-build-isolation --verbose .; \
+	pip install build ;\
+	python -m flashinfer.aot ;\
+	python -m build --no-isolation --wheel
 
 push-flashinfer-wheel:
 	# pip install twine
@@ -59,10 +65,10 @@ push-flashinfer-wheel:
 	python3 -m twine upload --repository-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi 3rdparty/flashinfer/dist/* --verbose
 
 vllm-sample:
-	VLLM_ATTENTION_BACKEND=FLASHINFER python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
+	VLLM_ATTENTION_BACKEND=FLASHINFER python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
 
 vllm-sample-flashattn:
-	VLLM_ATTENTION_BACKEND=FLASHATTN python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
+	VLLM_ATTENTION_BACKEND=FLASHATTN python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
 
 vllm-sample-bok:
 	VLLM_ATTENTION_BACKEND=BOK python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt 
@@ -74,6 +80,30 @@ build-model8b-edgar4:
 run-trtllm:
 	make -C docker dan-vllm_run DOCKER_RUN_ARGS="-e HF_TOKEN=$(HF_TOKEN) -e HF_HOME=/code/tensorrt_llm/tmp/hf_cache" LOCAL_USER=1
 
+run-base-vllm:
+	docker rm -f vllm_flashinfer
+	docker run --name vllm_flashinfer --gpus all --ipc host --shm-size 1g -e VLLM_ATTENTION_BACKEND=FLASHINFER -e HF_TOKEN=$(HF_TOKEN) -v $(shell pwd):$(shell pwd) -e HF_HOME=$(shell pwd)/tmp/hf_cache -p 8000:8000 vllm/vllm-openai:latest --model meta-llama/Llama-3.1-8B --dtype float16 --chat-template $(shell pwd)/examples/tool_chat_template_llama3.1_json.jinja
+	docker logs -f vllm_flashinfer
+
 trt-llm-setup:
 	python scripts/build_wheel.py --use_ccache -p -a native
  
+make send-requests:
+	bash -c '
+	curl -s -X POST http://localhost:8000/v1/chat/completions \
+	-H "Content-Type: application/json" \
+	-d "{\"model\":\"meta-llama/Llama-3.1-8B\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a short poem about the ocean.\"}],\"max_tokens\":10}" 
+
+	curl -s -X POST http://localhost:8000/v1/chat/completions \
+	-H "Content-Type: application/json" \
+	-d "{\"model\":\"meta-llama/Llama-3.1-8B\",\"messages\":[{\"role\":\"user\",\"content\":\"Explain quantum entanglement in simple terms.\"}],\"max_tokens\":10}" 
+
+	curl -s -X POST http://localhost:8000/v1/chat/completions \
+	-H "Content-Type: application/json" \
+	-d "{\"model\":\"meta-llama/Llama-3.1-8B\",\"messages\":[{\"role\":\"user\",\"content\":\"List three benefits of exercise.\"}],\"max_tokens\":10}" 
+
+	wait
+	echo "Request 1:"; cat req1.json; echo
+	echo "Request 2:"; cat req2.json; echo
+	echo "Request 3:"; cat req3.json
+	'
