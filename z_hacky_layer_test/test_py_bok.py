@@ -16,7 +16,7 @@ from py_bok import (
     PrefixCacheConfiguration,
 )
 
-from .utils import (
+from utils import (
     generate_constant_attention_input,
     identity_rotary_cos_sin,
     pack_attention_input,
@@ -322,6 +322,7 @@ def test_forward_inplace(test_case: ForwardInplaceTestCase):
         [_input_sequence_length(request) for request in test_case.requests],
         dtype=torch.int32,
     )
+    input_sequence_lengths_device = input_sequence_lengths_host.cuda()
     num_tokens = input_sequence_lengths_host.sum().item()
     sequence_lengths_device = sequence_lengths_host.cuda()
 
@@ -365,11 +366,14 @@ def test_forward_inplace(test_case: ForwardInplaceTestCase):
             dtype=torch.int8,
         )
         stream.synchronize()
+
+        # FIXME: add input_sequence_lengths_device
         forward_inplace(
             op,
             qkv,
             num_context_requests,
             input_sequence_lengths_host.to(torch.uint32),
+            input_sequence_lengths_device.to(torch.uint32),
             sequence_lengths_device.to(torch.uint32),
             sequence_lengths_host.to(torch.uint32),
             kv_cache_block_offsets.to(torch.uint32),

@@ -7,7 +7,7 @@ import numpy as np
 
 def run_cache_layer(backend: str) -> str:
     """Run cache_layer.py with specified backend and return output directory."""
-    cmd = ["python", "cache_layer.py", 
+    cmd = ["python", "z_hacky_layer_test/cache_layer.py", 
            "--backend", backend,
            "--model", "meta-llama/Llama-3.1-8B"]
     
@@ -125,8 +125,8 @@ def compare_outputs(dir1: str, dir2: str):
 
 def main():
     # Run with two different backends
-    backend1 = "FLASH_ATTN"
-    backend2 = "FLASH_ATTN_VLLM_V1"
+    backend1 = "BOK"
+    backend2 = "FLASHINFER"
     
     output_dir1 = run_cache_layer(backend1)
     output_dir2 = run_cache_layer(backend2)
