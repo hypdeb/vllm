@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, List
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
@@ -179,12 +179,29 @@ class BokMetadataBuilder:
 
         # TODO: find exact values.
         rotary_positional_embedding = RotaryEmbedding()
-        rotary_positional_embedding.rotaryEmbeddingScale = 1.0
-        rotary_positional_embedding.rotaryEmbeddingMaxPositions = 2048
-        rotary_positional_embedding.rotaryEmbeddingBase = 210000
-        rotary_positional_embedding.rotaryEmbeddingDim = 128
-        rotary_positional_embedding.rotaryScalingType = RotaryScalingType.NONE
-        rotary_positional_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
+        
+        rope_scaling = getattr(runner.vllm_config.model_config.hf_config, "rope_scaling", None)
+        scaling_factor = rope_scaling.get("factor", 1.0) if rope_scaling else 1.0
+        rotary_positional_embedding.rotaryEmbeddingScale = scaling_factor
+        mapping_dict = {
+            "none": RotaryScalingType.NONE,
+            "linear": RotaryScalingType.LINEAR,
+            "dynamic": RotaryScalingType.DYNAMIC,
+            "longrope": RotaryScalingType.LONG,
+            "llama3": RotaryScalingType.LLAMA3
+        }
+        rotary_positional_embedding.rotaryScalingType = mapping_dict[rope_scaling.get("type", "none")]
+        # rotary_positional_embedding.rotaryScalingType = RotaryScalingType.NONE
+
+        max_position_embeddings = getattr(runner.vllm_config.model_config.hf_config, "max_position_embeddings", 8192)
+        rotary_positional_embedding.rotaryEmbeddingMaxPositions = max_position_embeddings
+
+        rope_theta = getattr(runner.vllm_config.model_config.hf_config, "rope_theta", 10000)
+        rotary_positional_embedding.rotaryEmbeddingBase = rope_theta
+        
+
+        rotary_positional_embedding.rotaryEmbeddingDim = runner.vllm_config.model_config.get_head_size()
+        rotary_positional_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX #TODO: what to do with this?
         
         prefix_cache_configuration = PrefixCacheConfiguration()
         prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3 #TODO: needs to take actual dtype
@@ -193,6 +210,8 @@ class BokMetadataBuilder:
             block_table.max_num_blocks_per_req # TODO: check correctness
         )
 
+        print("model config", runner.vllm_config.model_config)
+        print("model config", runner.vllm_config.model_config.hf_config)
         max_attention_window_size = runner.vllm_config.model_config.max_model_len
         print("max_attention_window_size", max_attention_window_size)
         cyclic_attention_window_size = runner.vllm_config.model_config.max_model_len
@@ -245,6 +264,23 @@ class BokMetadataBuilder:
         )
 
         self.rotary_cos_sin = identity_rotary_cos_sin(rotary_positional_embedding)
+        print("new rotary_cos_sin.shape", self.rotary_cos_sin.shape)
+        _, rotary_cos_sin_ndarray = create_sinusoidal_positions_for_attention_plugin(
+            rotary_positional_embedding.rotaryEmbeddingMaxPositions,
+            rotary_positional_embedding.rotaryEmbeddingDim,
+            rotary_positional_embedding.rotaryEmbeddingBase,
+            rotary_positional_embedding.rotaryEmbeddingScale,
+            rotary_positional_embedding.rotaryScalingType,
+        )
+        print("rotary_cos_sin_ndarray.shape", rotary_cos_sin_ndarray.shape)
+        self.rotary_cos_sin = torch.tensor(
+            rotary_cos_sin_ndarray,
+            dtype=torch.float32,
+            device='cuda',
+        )
+        
+        print("new rotary_cos_sin.device", self.rotary_cos_sin.device)
+        print("old rotary_cos_sin.shape", self.rotary_cos_sin.shape)
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False #TODO: implement this
@@ -418,38 +454,32 @@ class BokImpl(AttentionImpl):
         seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
         kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
         kv_cache_data_ptr = kv_cache.data_ptr()
-        output = output.to(dtype=torch.int8)
+        output = output.to(dtype=torch.int8) #TODO: yeah, this is a hack and it won't work probably
         cuda_stream = torch.cuda.current_stream().cuda_stream
 
         # Debug prints to understand parameter types and shapes
-        print(f"DEBUG forward_inplace parameters:")
-        print(f"  op type: {type(attn_metadata.op)}")
-        print(f"  query type: {type(query)}, shape: {query.shape}, dtype: {query.dtype}, device: {query.device}")
-        print(f"  num_prefill_requests type: {type(attn_metadata.num_prefill_requests)}, value: {attn_metadata.num_prefill_requests}")
+        # print(f"DEBUG forward_inplace parameters:")
+        # print(f"  op type: {type(attn_metadata.op)}")
+        # print(f"  query type: {type(query)}, shape: {query.shape}, dtype: {query.dtype}, device: {query.device}")
+        # print(f"  num_prefill_requests type: {type(attn_metadata.num_prefill_requests)}, value: {attn_metadata.num_prefill_requests}")
         
-        seq_lens_cpu_uint32 = attn_metadata.seq_lens_cpu.to(torch.uint32)
-        seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
-        kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
         
-        print(f"  seq_lens_cpu_uint32 type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
-        print(f"  seq_lens_gpu_uint32 type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
-        print(f"  seq_lens_gpu_uint32 (repeat) type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
-        print(f"  seq_lens_cpu_uint32 (repeat) type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
-        print(f"  kv_cache_block_offsets_uint32 type: {type(kv_cache_block_offsets_uint32)}, shape: {kv_cache_block_offsets_uint32.shape}, dtype: {kv_cache_block_offsets_uint32.dtype}, device: {kv_cache_block_offsets_uint32.device}")
+        # print(f"  seq_lens_cpu_uint32 type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
+        # print(f"  seq_lens_gpu_uint32 type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
+        # print(f"  seq_lens_gpu_uint32 (repeat) type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
+        # print(f"  seq_lens_cpu_uint32 (repeat) type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
+        # print(f"  kv_cache_block_offsets_uint32 type: {type(kv_cache_block_offsets_uint32)}, shape: {kv_cache_block_offsets_uint32.shape}, dtype: {kv_cache_block_offsets_uint32.dtype}, device: {kv_cache_block_offsets_uint32.device}")
         
-        kv_cache_data_ptr = kv_cache.data_ptr()
-        print(f"  kv_cache_data_ptr type: {type(kv_cache_data_ptr)}, value: {kv_cache_data_ptr}")
-        print(f"  output_scaling_factor type: {type(attn_metadata.output_scaling_factor)}, shape: {attn_metadata.output_scaling_factor.shape}, dtype: {attn_metadata.output_scaling_factor.dtype}, device: {attn_metadata.output_scaling_factor.device}")
-        print(f"  rotary_cos_sin type: {type(attn_metadata.rotary_cos_sin)}, shape: {attn_metadata.rotary_cos_sin.shape}, dtype: {attn_metadata.rotary_cos_sin.dtype}, device: {attn_metadata.rotary_cos_sin.device}")
-        output = output.to(dtype=torch.int8)
-        print(f"  output type: {type(output)}, shape: {output.shape}, dtype: {output.dtype}, device: {output.device}")
-        print(f"  workspace type: {type(attn_metadata.workspace)}, shape: {attn_metadata.workspace.shape}, dtype: {attn_metadata.workspace.dtype}, device: {attn_metadata.workspace.device}")
+        # print(f"  kv_cache_data_ptr type: {type(kv_cache_data_ptr)}, value: {kv_cache_data_ptr}")
+        # print(f"  output_scaling_factor type: {type(attn_metadata.output_scaling_factor)}, shape: {attn_metadata.output_scaling_factor.shape}, dtype: {attn_metadata.output_scaling_factor.dtype}, device: {attn_metadata.output_scaling_factor.device}")
+        # print(f"  rotary_cos_sin type: {type(attn_metadata.rotary_cos_sin)}, shape: {attn_metadata.rotary_cos_sin.shape}, dtype: {attn_metadata.rotary_cos_sin.dtype}, device: {attn_metadata.rotary_cos_sin.device}")
+        # print(f"  output type: {type(output)}, shape: {output.shape}, dtype: {output.dtype}, device: {output.device}")
+        # print(f"  workspace type: {type(attn_metadata.workspace)}, shape: {attn_metadata.workspace.shape}, dtype: {attn_metadata.workspace.dtype}, device: {attn_metadata.workspace.device}")
         
-        cuda_stream = torch.cuda.current_stream().cuda_stream
-        print(f"  cuda_stream type: {type(cuda_stream)}, value: {cuda_stream}")
+        # print(f"  cuda_stream type: {type(cuda_stream)}, value: {cuda_stream}")
         
-        print(f"Expected signature from error:")
-        print(f"  forward_inplace(op, qkv, numContextRequests, inputSequenceLengthsHost, inputSequenceLengthsDevice, sequenceLengthsDevice, sequenceLengthsHost, kvCacheBlockOffsets, kvCachePoolPtr, outputScalingFactor, rotaryCosSin, output, workspace, stream)")
+        # print(f"Expected signature from error:")
+        # print(f"  forward_inplace(op, qkv, numContextRequests, inputSequenceLengthsHost, inputSequenceLengthsDevice, sequenceLengthsDevice, sequenceLengthsHost, kvCacheBlockOffsets, kvCachePoolPtr, outputScalingFactor, rotaryCosSin, output, workspace, stream)")
         
         forward_inplace(
             attn_metadata.op,
@@ -472,6 +502,63 @@ class BokImpl(AttentionImpl):
         return output
 
 
+import numpy as np
+import math
+def apply_llama3_scaling(inv_freqs: np.ndarray, rope_scaling_config: dict):
+
+    scale_factor = rope_scaling_config.get("factor", 8.0)
+    low_freq_factor = rope_scaling_config.get("low_freq_factor", 1.0)
+    high_freq_factor = rope_scaling_config.get("high_freq_factor", 4.0)
+    old_context_len = rope_scaling_config.get(
+        "original_max_position_embeddings", 8192)
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+    new_inv_freqs = []
+    for inv_freq in inv_freqs:
+        wavelen = 2 * math.pi / inv_freq
+        if wavelen < high_freq_wavelen:
+            new_inv_freqs.append(inv_freq)
+        elif wavelen > low_freq_wavelen:
+            new_inv_freqs.append(inv_freq / scale_factor)
+        else:
+            assert low_freq_wavelen != high_freq_wavelen
+            smooth = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor)
+            new_inv_freqs.append((1 - smooth) * inv_freq / scale_factor +
+                                    smooth * inv_freq)
+    return np.array(new_inv_freqs, dtype=inv_freqs.dtype)
+
+def create_sinusoidal_positions_for_attention_plugin(
+        num_pos: int,
+        dim: int,
+        theta: float = 10000.0,
+        scale: float = 1.0,
+        scale_type: RotaryScalingType = RotaryScalingType.NONE,
+        # Other scaling configs that only used by certain scaling types.
+        rope_scaling_config: dict = None,
+        dtype=np.float32) -> List[np.ndarray]:
+    if scale_type == RotaryScalingType.LINEAR:
+        scale = 1.0 / scale
+    if scale_type == RotaryScalingType.LLAMA3:
+        assert rope_scaling_config is not None, "rotary_scaling config must be provided."
+        inv_freq = 1.0 / (theta**(np.arange(0, dim, 2) / dim)).astype(dtype)
+        inv_freq = apply_llama3_scaling(
+            inv_freq, rope_scaling_config)
+    else:
+        inv_freq = scale / (theta
+                            **(np.arange(0, dim, 2) / dim)).astype(dtype)
+    sinusoid_inp = np.expand_dims(np.einsum("i , j -> i j",
+                                            np.arange(num_pos, dtype=dtype),
+                                            inv_freq,
+                                            dtype=dtype),
+                                    axis=-1)
+    # fuse cos/sin into float2 (cos, sin).
+    concat = np.concatenate(
+        (np.cos(sinusoid_inp), np.sin(sinusoid_inp)),
+        axis=-1)  #np.cos(sinusoid_inp).shape = (32768, 64, 1)
+
+    return inv_freq, concat.astype(dtype)
 
 #TODO: delete this?
 def identity_rotary_cos_sin(
