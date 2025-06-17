@@ -48,6 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.platforms.interface import _Backend
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
@@ -199,7 +200,14 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        if self.attn.backend != _Backend.BOK:
+            print("Applying rotary embedding")
+            print("self.attn.backend", self.attn.backend)
+            print("self.attn", self.attn)
+            q, k = self.rotary_emb(positions, q, k)
+        else:
+            pass
+            # print("Not applying rotary embedding")
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
