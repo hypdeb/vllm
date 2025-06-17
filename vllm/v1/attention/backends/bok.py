@@ -350,6 +350,10 @@ class BokImpl(AttentionImpl):
         kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
     ) -> None:
+        self.scale = scale
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.num_kv_heads = num_kv_heads
         if use_irope:
             logger.warning_once(
                 "Using irope in FlashInfer is not supported yet, it will fall"
