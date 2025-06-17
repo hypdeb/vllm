@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, List
 
 import torch
-from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
-                        BatchPrefillWithPagedKVCacheWrapper,
-                        MultiLevelCascadeAttentionWrapper)
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionType)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionType,
+)
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
@@ -37,7 +37,7 @@ from py_bok import (
     RotaryScalingType,
     RotaryPositionalEmbeddingType,
     PrefixCacheConfiguration,
-    AttentionOp
+    AttentionOp,
 )
 
 USING_BOK = True
@@ -93,8 +93,7 @@ class PerLayerParameters:
     sm_scale: float
 
 
-def get_per_layer_parameters(
-        vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
+def get_per_layer_parameters(vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
     """
     Scan all attention layers and determine some hyperparameters
     to use during `plan`.
@@ -113,14 +112,16 @@ def get_per_layer_parameters(
         logits_soft_cap = impl.logits_soft_cap
         sm_scale = impl.scale
 
-        per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
+        per_layer_params[key] = PerLayerParameters(
+            window_left, logits_soft_cap, sm_scale
+        )
 
     return per_layer_params
 
 
 def infer_global_hyperparameters(
-        per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
+    per_layer_params: dict[str, PerLayerParameters],
+) -> PerLayerParameters:
     """
     Currently, Bok backend only support models in which all layers share
     the same values for the following hyperparameters:
@@ -140,7 +141,8 @@ def infer_global_hyperparameters(
         assert params == global_params, (
             "Bok backend currently only supports models in which all "
             "layers share the same values for the following hyperparameters: "
-            "`window_left`, `logits_soft_cap`, `sm_scale`.")
+            "`window_left`, `logits_soft_cap`, `sm_scale`."
+        )
 
     return global_params
 
@@ -157,11 +159,17 @@ class BokMetadata:
     rotary_cos_sin: torch.Tensor
     block_table: BlockTable
     num_reqs: int
+    context_chunk_size: int
+
 
 class BokMetadataBuilder:
 
-    def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
+    def __init__(
+        self,
+        runner: GPUModelRunner,
+        kv_cache_spec: AttentionSpec,
+        block_table: BlockTable,
+    ):
         self.runner = runner
         self._workspace_buffer = None
 
@@ -171,6 +179,7 @@ class BokMetadataBuilder:
         self.vllm_config = runner.vllm_config
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
+        self.context_chunk_size = runner.scheduler_config.max_num_batched_tokens
 
         self.attention_layer_dimensions = AttentionLayerDimensions()
         self.attention_layer_dimensions.numQHeads = runner.num_query_heads
@@ -179,8 +188,10 @@ class BokMetadataBuilder:
 
         # TODO: find exact values.
         rotary_positional_embedding = RotaryEmbedding()
-        
-        rope_scaling = getattr(runner.vllm_config.model_config.hf_config, "rope_scaling", None)
+
+        rope_scaling = getattr(
+            runner.vllm_config.model_config.hf_config, "rope_scaling", None
+        )
         scaling_factor = rope_scaling.get("factor", 1.0) if rope_scaling else 1.0
         rotary_positional_embedding.rotaryEmbeddingScale = scaling_factor
         mapping_dict = {
@@ -188,26 +199,41 @@ class BokMetadataBuilder:
             "linear": RotaryScalingType.LINEAR,
             "dynamic": RotaryScalingType.DYNAMIC,
             "longrope": RotaryScalingType.LONG,
-            "llama3": RotaryScalingType.LLAMA3
+            "llama3": RotaryScalingType.LLAMA3,
         }
-        rotary_positional_embedding.rotaryScalingType = mapping_dict[rope_scaling.get("type", "none")]
+        rotary_positional_embedding.rotaryScalingType = mapping_dict[
+            rope_scaling.get("type", "none")
+        ]
         # rotary_positional_embedding.rotaryScalingType = RotaryScalingType.NONE
 
-        max_position_embeddings = getattr(runner.vllm_config.model_config.hf_config, "max_position_embeddings", 8192)
-        rotary_positional_embedding.rotaryEmbeddingMaxPositions = max_position_embeddings
+        max_position_embeddings = getattr(
+            runner.vllm_config.model_config.hf_config, "max_position_embeddings", 8192
+        )
+        rotary_positional_embedding.rotaryEmbeddingMaxPositions = (
+            max_position_embeddings
+        )
 
-        rope_theta = getattr(runner.vllm_config.model_config.hf_config, "rope_theta", 10000)
+        rope_theta = getattr(
+            runner.vllm_config.model_config.hf_config, "rope_theta", 10000
+        )
         rotary_positional_embedding.rotaryEmbeddingBase = rope_theta
-        
 
-        rotary_positional_embedding.rotaryEmbeddingDim = runner.vllm_config.model_config.get_head_size()
-        rotary_positional_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX #TODO: what to do with this?
-        
+        rotary_positional_embedding.rotaryEmbeddingDim = (
+            runner.vllm_config.model_config.get_head_size()
+        )
+        rotary_positional_embedding.type = (
+            RotaryPositionalEmbeddingType.GPT_NEOX
+        )  # TODO: what to do with this?
+
         prefix_cache_configuration = PrefixCacheConfiguration()
-        prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3 #TODO: needs to take actual dtype
-        prefix_cache_configuration.numTokensPerBlock = kv_cache_spec.block_size # TODO: check correctness
+        prefix_cache_configuration.dataType = (
+            DeviceDataType.FP8_E4M3
+        )  # TODO: needs to take actual dtype
+        prefix_cache_configuration.numTokensPerBlock = (
+            kv_cache_spec.block_size
+        )  # TODO: check correctness
         prefix_cache_configuration.maxNumBlocksPerSequence = (
-            block_table.max_num_blocks_per_req # TODO: check correctness
+            block_table.max_num_blocks_per_req  # TODO: check correctness
         )
 
         print("model config", runner.vllm_config.model_config)
@@ -227,12 +253,14 @@ class BokMetadataBuilder:
             [1.0], device=torch.device("cuda"), dtype=torch.float32
         )
 
-        #TODO: check if max_num_seqs == max_batch_size
+        # TODO: check if max_num_seqs == max_batch_size
         multi_block_semaphores = torch.zeros(
-            runner.num_query_heads * runner.scheduler_config.max_num_seqs, device=torch.device("cuda"), dtype=torch.int32
+            runner.num_query_heads * runner.scheduler_config.max_num_seqs,
+            device=torch.device("cuda"),
+            dtype=torch.int32,
         )
 
-        #TODO: what this do
+        # TODO: what this do
         self.output_scaling_factor = torch.tensor(
             [1.0],
             device=torch.device("cuda"),
@@ -253,18 +281,21 @@ class BokMetadataBuilder:
             kvScaleOrigQuant=kv_scale_orig_quant,
             kvScaleQuantOrig=kv_scale_quant_orig,
             multiBlockSemaphores=multi_block_semaphores,
+            enableSpeculativeDecoding=False,
         )
-        #TODO: check if max_num_seqs == max_batch_size
+        # TODO: check if max_num_seqs == max_batch_size
         workspace_size = calculate_workspace_size(
-            self.op, self.runner.max_num_tokens, self.runner.scheduler_config.max_num_seqs 
+            self.op,
+            self.runner.max_num_tokens,
+            self.runner.scheduler_config.max_num_seqs,
         )
 
         self.workspace = torch.zeros(
             workspace_size, device=torch.device("cuda"), dtype=torch.int8
         )
 
-        self.rotary_cos_sin = identity_rotary_cos_sin(rotary_positional_embedding)
-        print("new rotary_cos_sin.shape", self.rotary_cos_sin.shape)
+        # self.rotary_cos_sin = identity_rotary_cos_sin(rotary_positional_embedding)
+        # print("new rotary_cos_sin.shape", self.rotary_cos_sin.shape)
         _, rotary_cos_sin_ndarray = create_sinusoidal_positions_for_attention_plugin(
             rotary_positional_embedding.rotaryEmbeddingMaxPositions,
             rotary_positional_embedding.rotaryEmbeddingDim,
@@ -276,17 +307,18 @@ class BokMetadataBuilder:
         self.rotary_cos_sin = torch.tensor(
             rotary_cos_sin_ndarray,
             dtype=torch.float32,
-            device='cuda',
+            device="cuda",
         )
-        
+
         print("new rotary_cos_sin.device", self.rotary_cos_sin.device)
         print("old rotary_cos_sin.shape", self.rotary_cos_sin.shape)
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False #TODO: implement this
+        return False  # TODO: implement this
 
-    def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> bool:
+    def reorder_batch(
+        self, input_batch: InputBatch, scheduler_output: SchedulerOutput
+    ) -> bool:
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
@@ -333,7 +365,6 @@ class BokMetadataBuilder:
             input_batch.swap_states(prefills[i - 1], decode_idx)
             modified_batch = True
 
-
         self._num_decode_requests = num_decodes
         self._num_prefill_requests = num_prefills
         self._num_decode_tokens = num_decode_tokens
@@ -341,13 +372,16 @@ class BokMetadataBuilder:
 
         return modified_batch
 
-
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(
+        self,
+        num_reqs: int,
+        num_actual_tokens: int,
+        max_query_len: int,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+    ):
         assert self._num_decode_requests + self._num_prefill_requests == num_reqs
-        assert (self._num_decode_tokens +
-                self._num_prefill_tokens == num_actual_tokens)
+        assert self._num_decode_tokens + self._num_prefill_tokens == num_actual_tokens
 
         seq_lens_gpu = common_attn_metadata.seq_lens
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
@@ -363,8 +397,8 @@ class BokMetadataBuilder:
             rotary_cos_sin=self.rotary_cos_sin,
             block_table=self.block_table,
             num_reqs=num_reqs,
+            context_chunk_size=self.context_chunk_size,
         )
-
 
         return attn_metadata
 
@@ -393,7 +427,8 @@ class BokImpl(AttentionImpl):
         if use_irope:
             logger.warning_once(
                 "Using irope in FlashInfer is not supported yet, it will fall"
-                " back to global attention for long context.")
+                " back to global attention for long context."
+            )
         self.scale = float(scale)
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
@@ -406,12 +441,13 @@ class BokImpl(AttentionImpl):
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
-
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashInferImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "FlashInferImpl"
+            )
 
     def forward(
         self,
@@ -439,10 +475,10 @@ class BokImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
-        
+
         vanilla_block_table = attn_metadata.block_table.block_table
 
-        kv_cache_block_offsets = vanilla_block_table[:attn_metadata.num_reqs,:]
+        kv_cache_block_offsets = vanilla_block_table[: attn_metadata.num_reqs, :]
         # print("selected_vanilla_block_table.shape", selected_vanilla_block_table.shape)
         # k_offsets = selected_vanilla_block_table*2
         # v_offsets = selected_vanilla_block_table*2 + 1
@@ -454,7 +490,9 @@ class BokImpl(AttentionImpl):
         seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
         kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
         kv_cache_data_ptr = kv_cache.data_ptr()
-        output = output.to(dtype=torch.int8) #TODO: yeah, this is a hack and it won't work probably
+        output = output.to(
+            dtype=torch.int8
+        )  # TODO: yeah, this is a hack and it won't work probably
         cuda_stream = torch.cuda.current_stream().cuda_stream
 
         # Debug prints to understand parameter types and shapes
@@ -462,31 +500,31 @@ class BokImpl(AttentionImpl):
         # print(f"  op type: {type(attn_metadata.op)}")
         # print(f"  query type: {type(query)}, shape: {query.shape}, dtype: {query.dtype}, device: {query.device}")
         # print(f"  num_prefill_requests type: {type(attn_metadata.num_prefill_requests)}, value: {attn_metadata.num_prefill_requests}")
-        
-        
+
         # print(f"  seq_lens_cpu_uint32 type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
         # print(f"  seq_lens_gpu_uint32 type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
         # print(f"  seq_lens_gpu_uint32 (repeat) type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
         # print(f"  seq_lens_cpu_uint32 (repeat) type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
         # print(f"  kv_cache_block_offsets_uint32 type: {type(kv_cache_block_offsets_uint32)}, shape: {kv_cache_block_offsets_uint32.shape}, dtype: {kv_cache_block_offsets_uint32.dtype}, device: {kv_cache_block_offsets_uint32.device}")
-        
+
         # print(f"  kv_cache_data_ptr type: {type(kv_cache_data_ptr)}, value: {kv_cache_data_ptr}")
         # print(f"  output_scaling_factor type: {type(attn_metadata.output_scaling_factor)}, shape: {attn_metadata.output_scaling_factor.shape}, dtype: {attn_metadata.output_scaling_factor.dtype}, device: {attn_metadata.output_scaling_factor.device}")
         # print(f"  rotary_cos_sin type: {type(attn_metadata.rotary_cos_sin)}, shape: {attn_metadata.rotary_cos_sin.shape}, dtype: {attn_metadata.rotary_cos_sin.dtype}, device: {attn_metadata.rotary_cos_sin.device}")
         # print(f"  output type: {type(output)}, shape: {output.shape}, dtype: {output.dtype}, device: {output.device}")
         # print(f"  workspace type: {type(attn_metadata.workspace)}, shape: {attn_metadata.workspace.shape}, dtype: {attn_metadata.workspace.dtype}, device: {attn_metadata.workspace.device}")
-        
+
         # print(f"  cuda_stream type: {type(cuda_stream)}, value: {cuda_stream}")
-        
+
         # print(f"Expected signature from error:")
         # print(f"  forward_inplace(op, qkv, numContextRequests, inputSequenceLengthsHost, inputSequenceLengthsDevice, sequenceLengthsDevice, sequenceLengthsHost, kvCacheBlockOffsets, kvCachePoolPtr, outputScalingFactor, rotaryCosSin, output, workspace, stream)")
-        
+
         forward_inplace(
             attn_metadata.op,
             query,
             attn_metadata.num_prefill_requests,
-            #TODO: see how to get actual input seqlens
-            #TODO: see how to skip / workaround the uint cast
+            attn_metadata.context_chunk_size,
+            # TODO: see how to get actual input seqlens
+            # TODO: see how to skip / workaround the uint cast
             seq_lens_cpu_uint32,
             seq_lens_gpu_uint32,
             seq_lens_gpu_uint32,
@@ -504,13 +542,14 @@ class BokImpl(AttentionImpl):
 
 import numpy as np
 import math
+
+
 def apply_llama3_scaling(inv_freqs: np.ndarray, rope_scaling_config: dict):
 
     scale_factor = rope_scaling_config.get("factor", 8.0)
     low_freq_factor = rope_scaling_config.get("low_freq_factor", 1.0)
     high_freq_factor = rope_scaling_config.get("high_freq_factor", 4.0)
-    old_context_len = rope_scaling_config.get(
-        "original_max_position_embeddings", 8192)
+    old_context_len = rope_scaling_config.get("original_max_position_embeddings", 8192)
 
     low_freq_wavelen = old_context_len / low_freq_factor
     high_freq_wavelen = old_context_len / high_freq_factor
@@ -524,43 +563,49 @@ def apply_llama3_scaling(inv_freqs: np.ndarray, rope_scaling_config: dict):
         else:
             assert low_freq_wavelen != high_freq_wavelen
             smooth = (old_context_len / wavelen - low_freq_factor) / (
-                high_freq_factor - low_freq_factor)
-            new_inv_freqs.append((1 - smooth) * inv_freq / scale_factor +
-                                    smooth * inv_freq)
+                high_freq_factor - low_freq_factor
+            )
+            new_inv_freqs.append(
+                (1 - smooth) * inv_freq / scale_factor + smooth * inv_freq
+            )
     return np.array(new_inv_freqs, dtype=inv_freqs.dtype)
 
+
 def create_sinusoidal_positions_for_attention_plugin(
-        num_pos: int,
-        dim: int,
-        theta: float = 10000.0,
-        scale: float = 1.0,
-        scale_type: RotaryScalingType = RotaryScalingType.NONE,
-        # Other scaling configs that only used by certain scaling types.
-        rope_scaling_config: dict = None,
-        dtype=np.float32) -> List[np.ndarray]:
+    num_pos: int,
+    dim: int,
+    theta: float = 10000.0,
+    scale: float = 1.0,
+    scale_type: RotaryScalingType = RotaryScalingType.NONE,
+    # Other scaling configs that only used by certain scaling types.
+    rope_scaling_config: dict = None,
+    dtype=np.float32,
+) -> List[np.ndarray]:
     if scale_type == RotaryScalingType.LINEAR:
         scale = 1.0 / scale
     if scale_type == RotaryScalingType.LLAMA3:
-        assert rope_scaling_config is not None, "rotary_scaling config must be provided."
-        inv_freq = 1.0 / (theta**(np.arange(0, dim, 2) / dim)).astype(dtype)
-        inv_freq = apply_llama3_scaling(
-            inv_freq, rope_scaling_config)
+        assert (
+            rope_scaling_config is not None
+        ), "rotary_scaling config must be provided."
+        inv_freq = 1.0 / (theta ** (np.arange(0, dim, 2) / dim)).astype(dtype)
+        inv_freq = apply_llama3_scaling(inv_freq, rope_scaling_config)
     else:
-        inv_freq = scale / (theta
-                            **(np.arange(0, dim, 2) / dim)).astype(dtype)
-    sinusoid_inp = np.expand_dims(np.einsum("i , j -> i j",
-                                            np.arange(num_pos, dtype=dtype),
-                                            inv_freq,
-                                            dtype=dtype),
-                                    axis=-1)
+        inv_freq = scale / (theta ** (np.arange(0, dim, 2) / dim)).astype(dtype)
+    sinusoid_inp = np.expand_dims(
+        np.einsum(
+            "i , j -> i j", np.arange(num_pos, dtype=dtype), inv_freq, dtype=dtype
+        ),
+        axis=-1,
+    )
     # fuse cos/sin into float2 (cos, sin).
     concat = np.concatenate(
-        (np.cos(sinusoid_inp), np.sin(sinusoid_inp)),
-        axis=-1)  #np.cos(sinusoid_inp).shape = (32768, 64, 1)
+        (np.cos(sinusoid_inp), np.sin(sinusoid_inp)), axis=-1
+    )  # np.cos(sinusoid_inp).shape = (32768, 64, 1)
 
-    return inv_freq, concat.astype(dtype)
+    return inv_freq, concat.astype(dtype).reshape(num_pos, dim)
 
-#TODO: delete this?
+
+# TODO: delete this?
 def identity_rotary_cos_sin(
     rotary_embedding_parameters: RotaryEmbedding,
 ) -> torch.Tensor:
@@ -585,7 +630,7 @@ def identity_rotary_cos_sin(
         device=torch.device("cuda"),
         dtype=torch.float32,
     )
-    
+
     print("sin_values.shape", sin_values.shape)
     print("cos_values.shape", cos_values.shape)
     # Stack them together to get the cos and sin values for each position.
