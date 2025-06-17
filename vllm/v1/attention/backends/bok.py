@@ -57,7 +57,7 @@ class BokAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "BOK_VLLM_V1"
+        return "BOK"
 
     @staticmethod
     def get_impl_cls() -> type[BokImpl]:
