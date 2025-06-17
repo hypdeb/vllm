@@ -426,7 +426,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         device = self.runner.device
         qo_indptr = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
+        torch.set_printoptions(threshold=float('inf'), linewidth=20000)
+
+        print("seq_lens", seq_lens)
         block_table_tensor = self.block_table.get_device_tensor()[:num_reqs]
+        print("initial block_table_tensor", block_table_tensor)
         slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
 
@@ -462,6 +466,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                              device=block_table_tensor.device).unsqueeze(0)
                 < block_table_bounds.unsqueeze(1))
         paged_kv_indices = block_table_tensor[mask]
+        print("end block_table_tensor", block_table_tensor.shape)
 
         paged_kv_indptr = torch.cat([
             torch.zeros(1,
@@ -469,7 +474,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         device=block_table_bounds.device),
             block_table_bounds.cumsum(dim=0, dtype=torch.int32)
         ])
-
+        print("cumsum thing block_table_tensor", block_table_tensor.shape)
+        torch.set_printoptions(threshold=None)
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)

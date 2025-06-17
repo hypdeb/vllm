@@ -244,6 +244,9 @@ class BokMetadataBuilder:
 
         self.rotary_cos_sin = identity_rotary_cos_sin(rotary_positional_embedding)
 
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return False #TODO: implement this
+
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
         # We now want to reorder the batch so that the "decode" requests are and
@@ -389,27 +392,26 @@ class BokImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert output is not None, "Output tensor must be provided."
 
-        # Create qkv tensor and reshape to desired view
-        query_ptr = query.data_ptr()
-        query_flattened = query.view(-1, self.num_heads * self.head_size)
-        key_flattened = key.view(-1, self.num_kv_heads * self.head_size)
-        value_flattened = value.view(-1, self.num_kv_heads * self.head_size)
-
-        # Reshape to [num_tokens, (num_heads + 2*num_kv_heads)*head_size]
-        qkv = torch.cat([query_flattened, key_flattened, value_flattened], dim=-1)
-
+        if attn_metadata is None:
+            # Profiling run.
+            return output
+        
         vanilla_block_table = attn_metadata.block_table.block_table
 
-        k_offsets = vanilla_block_table*2
-        v_offsets = vanilla_block_table*2 + 1
+        selected_vanilla_block_table = vanilla_block_table[:attn_metadata.num_reqs,:]
+        print("selected_vanilla_block_table.shape", selected_vanilla_block_table.shape)
+        k_offsets = selected_vanilla_block_table*2
+        v_offsets = selected_vanilla_block_table*2 + 1
         kv_cache_block_offsets = torch.stack([k_offsets, v_offsets], dim=0)
+        print("kv_cache_block_offsets.shape", kv_cache_block_offsets.shape)
         kv_cache_block_offsets = kv_cache_block_offsets.view((attn_metadata.num_reqs, 2, attn_metadata.block_table.max_num_blocks_per_req))
 
 
         forward_inplace(
             attn_metadata.op,
-            qkv,
+            query,
             numContextRequests=attn_metadata.num_prefill_requests,
             #TODO: see how to get actual input seqlens
             #TODO: see how to skip / workaround the uint cast
@@ -426,7 +428,6 @@ class BokImpl(AttentionImpl):
             stream=torch.cuda.current_stream().cuda_stream,
         )
         return output
-
 
 
 
