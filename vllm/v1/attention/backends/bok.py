@@ -414,6 +414,12 @@ class BokImpl(AttentionImpl):
         # print("kv_cache_block_offsets.shape", kv_cache_block_offsets.shape)
         # kv_cache_block_offsets = kv_cache_block_offsets.view((attn_metadata.num_reqs, 2* attn_metadata.block_table.max_num_blocks_per_req))
 
+        seq_lens_cpu_uint32 = attn_metadata.seq_lens_cpu.to(torch.uint32)
+        seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
+        kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
+        kv_cache_data_ptr = kv_cache.data_ptr()
+        output = output.to(dtype=torch.int8)
+        cuda_stream = torch.cuda.current_stream().cuda_stream
 
         # Debug prints to understand parameter types and shapes
         print(f"DEBUG forward_inplace parameters:")
