@@ -180,9 +180,11 @@ class BokMetadataBuilder:
         # TODO: find exact values.
         rotary_positional_embedding = RotaryEmbedding()
         rotary_positional_embedding.rotaryEmbeddingScale = 1.0
-        rotary_positional_embedding.rotaryEmbeddingMaxPositions = 1 << 14
+        rotary_positional_embedding.rotaryEmbeddingMaxPositions = 2048
         rotary_positional_embedding.rotaryEmbeddingBase = 210000
+        rotary_positional_embedding.rotaryEmbeddingDim = 128
         rotary_positional_embedding.rotaryScalingType = RotaryScalingType.NONE
+        rotary_positional_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
         
         prefix_cache_configuration = PrefixCacheConfiguration()
         prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3 #TODO: needs to take actual dtype
@@ -400,32 +402,62 @@ class BokImpl(AttentionImpl):
         
         vanilla_block_table = attn_metadata.block_table.block_table
 
-        selected_vanilla_block_table = vanilla_block_table[:attn_metadata.num_reqs,:]
-        print("selected_vanilla_block_table.shape", selected_vanilla_block_table.shape)
-        k_offsets = selected_vanilla_block_table*2
-        v_offsets = selected_vanilla_block_table*2 + 1
-        kv_cache_block_offsets = torch.stack([k_offsets, v_offsets], dim=0)
-        print("kv_cache_block_offsets.shape", kv_cache_block_offsets.shape)
-        kv_cache_block_offsets = kv_cache_block_offsets.view((attn_metadata.num_reqs, 2, attn_metadata.block_table.max_num_blocks_per_req))
+        kv_cache_block_offsets = vanilla_block_table[:attn_metadata.num_reqs,:]
+        # print("selected_vanilla_block_table.shape", selected_vanilla_block_table.shape)
+        # k_offsets = selected_vanilla_block_table*2
+        # v_offsets = selected_vanilla_block_table*2 + 1
+        # kv_cache_block_offsets = torch.stack([k_offsets, v_offsets], dim=0)
+        # print("kv_cache_block_offsets.shape", kv_cache_block_offsets.shape)
+        # kv_cache_block_offsets = kv_cache_block_offsets.view((attn_metadata.num_reqs, 2* attn_metadata.block_table.max_num_blocks_per_req))
 
 
+        # Debug prints to understand parameter types and shapes
+        print(f"DEBUG forward_inplace parameters:")
+        print(f"  op type: {type(attn_metadata.op)}")
+        print(f"  query type: {type(query)}, shape: {query.shape}, dtype: {query.dtype}, device: {query.device}")
+        print(f"  num_prefill_requests type: {type(attn_metadata.num_prefill_requests)}, value: {attn_metadata.num_prefill_requests}")
+        
+        seq_lens_cpu_uint32 = attn_metadata.seq_lens_cpu.to(torch.uint32)
+        seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
+        kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
+        
+        print(f"  seq_lens_cpu_uint32 type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
+        print(f"  seq_lens_gpu_uint32 type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
+        print(f"  seq_lens_gpu_uint32 (repeat) type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
+        print(f"  seq_lens_cpu_uint32 (repeat) type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
+        print(f"  kv_cache_block_offsets_uint32 type: {type(kv_cache_block_offsets_uint32)}, shape: {kv_cache_block_offsets_uint32.shape}, dtype: {kv_cache_block_offsets_uint32.dtype}, device: {kv_cache_block_offsets_uint32.device}")
+        
+        kv_cache_data_ptr = kv_cache.data_ptr()
+        print(f"  kv_cache_data_ptr type: {type(kv_cache_data_ptr)}, value: {kv_cache_data_ptr}")
+        print(f"  output_scaling_factor type: {type(attn_metadata.output_scaling_factor)}, shape: {attn_metadata.output_scaling_factor.shape}, dtype: {attn_metadata.output_scaling_factor.dtype}, device: {attn_metadata.output_scaling_factor.device}")
+        print(f"  rotary_cos_sin type: {type(attn_metadata.rotary_cos_sin)}, shape: {attn_metadata.rotary_cos_sin.shape}, dtype: {attn_metadata.rotary_cos_sin.dtype}, device: {attn_metadata.rotary_cos_sin.device}")
+        output = output.to(dtype=torch.int8)
+        print(f"  output type: {type(output)}, shape: {output.shape}, dtype: {output.dtype}, device: {output.device}")
+        print(f"  workspace type: {type(attn_metadata.workspace)}, shape: {attn_metadata.workspace.shape}, dtype: {attn_metadata.workspace.dtype}, device: {attn_metadata.workspace.device}")
+        
+        cuda_stream = torch.cuda.current_stream().cuda_stream
+        print(f"  cuda_stream type: {type(cuda_stream)}, value: {cuda_stream}")
+        
+        print(f"Expected signature from error:")
+        print(f"  forward_inplace(op, qkv, numContextRequests, inputSequenceLengthsHost, inputSequenceLengthsDevice, sequenceLengthsDevice, sequenceLengthsHost, kvCacheBlockOffsets, kvCachePoolPtr, outputScalingFactor, rotaryCosSin, output, workspace, stream)")
+        
         forward_inplace(
             attn_metadata.op,
             query,
-            numContextRequests=attn_metadata.num_prefill_requests,
+            attn_metadata.num_prefill_requests,
             #TODO: see how to get actual input seqlens
             #TODO: see how to skip / workaround the uint cast
-            inputSequenceLengthsHost=attn_metadata.seq_lens_cpu.to(torch.uint32),
-            inputSequenceLengthsDevice=attn_metadata.seq_lens_gpu.to(torch.uint32),
-            sequenceLengthsDevice=attn_metadata.seq_lens_gpu.to(torch.uint32),
-            sequenceLengthsHost=attn_metadata.seq_lens_cpu.to(torch.uint32),
-            kvCacheBlockOffsets=kv_cache_block_offsets.to(torch.uint32),
-            kvCachePoolPtr=kv_cache.data_ptr(),
-            outputScalingFactor=attn_metadata.output_scaling_factor,
-            rotaryCosSin=attn_metadata.rotary_cos_sin,
-            output=output,
-            workspace=attn_metadata.workspace,
-            stream=torch.cuda.current_stream().cuda_stream,
+            seq_lens_cpu_uint32,
+            seq_lens_gpu_uint32,
+            seq_lens_gpu_uint32,
+            seq_lens_cpu_uint32,
+            kv_cache_block_offsets_uint32,
+            kv_cache_data_ptr,
+            attn_metadata.output_scaling_factor,
+            attn_metadata.rotary_cos_sin,
+            output,
+            attn_metadata.workspace,
+            cuda_stream,
         )
         return output
 
@@ -456,9 +488,12 @@ def identity_rotary_cos_sin(
         device=torch.device("cuda"),
         dtype=torch.float32,
     )
-
+    
+    print("sin_values.shape", sin_values.shape)
+    print("cos_values.shape", cos_values.shape)
     # Stack them together to get the cos and sin values for each position.
     result = torch.stack([cos_values, sin_values], dim=2)
+    print("result.shape", result.shape)
     assert result.shape == (
         rotary_embedding_parameters.rotaryEmbeddingMaxPositions,
         rotary_embedding_parameters.rotaryEmbeddingDim,
