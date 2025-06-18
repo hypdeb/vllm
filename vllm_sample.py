@@ -20,46 +20,66 @@ from py_bok import (
     RotaryScalingType,
     RotaryPositionalEmbeddingType,
     PrefixCacheConfiguration,
-    AttentionOp
+    AttentionOp,
 )
+
 
 class SomeClass:
     def __init__(self):
         print("here 1", flush=True)
-        from z_hacky_layer_test.test_py_bok import ForwardInplaceTestCase, ContextRequest, GenerationRequest, _sequence_length, _input_sequence_length
-        from z_hacky_layer_test.utils import identity_rotary_cos_sin, generate_constant_attention_input, pack_attention_input
+        from z_hacky_layer_test.test_py_bok import (
+            ForwardInplaceTestCase,
+            ContextRequest,
+            GenerationRequest,
+            _sequence_length,
+            _input_sequence_length,
+        )
+        from z_hacky_layer_test.utils import (
+            identity_rotary_cos_sin,
+            generate_constant_attention_input,
+            pack_attention_input,
+        )
+
         self.stream = torch.cuda.current_stream()
         attention_layer_dimensions = AttentionLayerDimensions()
         attention_layer_dimensions.numQHeads = 32
         attention_layer_dimensions.numKVHeads = 4
         attention_layer_dimensions.headSize = 64
         self.test_case = ForwardInplaceTestCase(
-                num_layers=1,
-                max_batch_size=64,
-                max_num_tokens=(1 << 14),
-                attention_layer_dimensions=attention_layer_dimensions,
-                rotary_embedding_dim=128,
-                rotary_embedding_base=10000,
-                rotary_embedding_max_positions=2048,
-                max_attention_window_size=(1 << 15),
-                num_tokens_per_block=32,
-                max_num_blocks_per_sequence=512,
-                requests=(ContextRequest(sequence_length=1024),),
-                output_scaling_factor=1.0,
-            )
+            num_layers=1,
+            max_batch_size=64,
+            max_num_tokens=(1 << 14),
+            attention_layer_dimensions=attention_layer_dimensions,
+            rotary_embedding_dim=128,
+            rotary_embedding_base=10000,
+            rotary_embedding_max_positions=2048,
+            max_attention_window_size=(1 << 15),
+            num_tokens_per_block=32,
+            max_num_blocks_per_sequence=512,
+            requests=(ContextRequest(sequence_length=1024),),
+            output_scaling_factor=1.0,
+        )
         print("here 2", flush=True)
         self.rotary_embedding = RotaryEmbedding()
         self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
-        self.rotary_embedding.rotaryEmbeddingDim = 128 #TODO: make this configurable
-        self.rotary_embedding.rotaryEmbeddingBase = 10000 #TODO: make this configurable
-        self.rotary_embedding.rotaryEmbeddingScale = 0 #TODO: make this configurable
-        self.rotary_embedding.rotaryEmbeddingMaxPositions = 2048 #TODO: make this configurable   
-        self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE #TODO: make this configurable
+        self.rotary_embedding.rotaryEmbeddingDim = 128  # TODO: make this configurable
+        self.rotary_embedding.rotaryEmbeddingBase = (
+            10000  # TODO: make this configurable
+        )
+        self.rotary_embedding.rotaryEmbeddingScale = 0  # TODO: make this configurable
+        self.rotary_embedding.rotaryEmbeddingMaxPositions = (
+            2048  # TODO: make this configurable
+        )
+        self.rotary_embedding.rotaryScalingType = (
+            RotaryScalingType.NONE
+        )  # TODO: make this configurable
 
         self.prefix_cache_configuration = PrefixCacheConfiguration()
-        self.prefix_cache_configuration.numTokensPerBlock = 32 #TODO: make this configurable
+        self.prefix_cache_configuration.numTokensPerBlock = (
+            32  # TODO: make this configurable
+        )
         self.prefix_cache_configuration.maxNumBlocksPerSequence = (
-            512 #TODO: make this configurable
+            512  # TODO: make this configurable
         )
         self.prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3
 
@@ -73,7 +93,8 @@ class SomeClass:
             [1.0], device=torch.device("cuda"), dtype=torch.float32
         )
         multi_block_semaphores = torch.zeros(
-            self.test_case.max_batch_size * self.test_case.attention_layer_dimensions.numQHeads,
+            self.test_case.max_batch_size
+            * self.test_case.attention_layer_dimensions.numQHeads,
             device=torch.device("cuda"),
             dtype=torch.int32,
         )
@@ -95,31 +116,59 @@ class SomeClass:
         )
         print("here 4", flush=True)
 
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Benchmark VLLM model with multiple prompts")
+    parser = argparse.ArgumentParser(
+        description="Benchmark VLLM model with multiple prompts"
+    )
     parser.add_argument("--model", type=str, required=True, help="Model name or path")
-    parser.add_argument("--prompts", type=str, nargs="+", help="List of prompts to process")
-    parser.add_argument("--prompts-file", type=str, help="Path to file containing prompts (one per line)")
-    parser.add_argument("--batch-size", type=int, default=1, help="Batch size for processing")
-    parser.add_argument("--output-len", type=int, default=128, help="Maximum number of tokens to generate")
-    parser.add_argument("--num-iters", type=int, default=5, help="Number of iterations to run")
-    parser.add_argument("--num-iters-warmup", type=int, default=2, help="Number of iterations for warmup")
-    parser.add_argument("--enforce-eager", action="store_true", help="Enforce eager execution")
-    parser.add_argument("--output-json", type=str, help="Path to save the results in JSON format")
+    parser.add_argument(
+        "--prompts", type=str, nargs="+", help="List of prompts to process"
+    )
+    parser.add_argument(
+        "--prompts-file",
+        type=str,
+        help="Path to file containing prompts (one per line)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=1, help="Batch size for processing"
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=128,
+        help="Maximum number of tokens to generate",
+    )
+    parser.add_argument(
+        "--num-iters", type=int, default=5, help="Number of iterations to run"
+    )
+    parser.add_argument(
+        "--num-iters-warmup",
+        type=int,
+        default=2,
+        help="Number of iterations for warmup",
+    )
+    parser.add_argument(
+        "--enforce-eager", action="store_true", help="Enforce eager execution"
+    )
+    parser.add_argument(
+        "--output-json", type=str, help="Path to save the results in JSON format"
+    )
     return parser.parse_args()
+
 
 def main():
     args = parse_args()
-    
+
     # Load prompts from file if specified
     prompts = args.prompts or []
     if args.prompts_file:
         with open(args.prompts_file, "r", encoding="utf-8") as f:
             prompts.extend([line.strip() for line in f if line.strip()])
-    
+
     if not prompts:
         raise ValueError("No prompts provided. Use --prompts or --prompts-file")
-    
+
     print(f"Model: {args.model}")
     print(f"Number of prompts: {len(prompts)}")
     print(f"Batch size: {args.batch_size}")
@@ -129,36 +178,36 @@ def main():
 
     # SomeClass()
 
-
     # Initialize model
     llm = LLM(
         model=args.model,
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
-        gpu_memory_utilization = 0.3,
+        gpu_memory_utilization=0.3,
         quantization="modelopt",
+        kv_cache_dtype="fp8",
     )
-    
+
     sampling_params = SamplingParams(
         temperature=1.0,
         top_p=1.0,
         max_tokens=args.output_len,
     )
-    
+
     # Process prompts in batches
     def process_prompts():
         results = []
         for i in range(0, len(prompts), args.batch_size):
-            batch = prompts[i:i + args.batch_size]
+            batch = prompts[i : i + args.batch_size]
             outputs = llm.generate(batch, sampling_params)
             results.extend(outputs)
         return results
-    
+
     # Warmup runs
     print("\nWarming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
         process_prompts()
-    
+
     # Benchmark runs
     print("\nBenchmarking...")
     latencies = []
@@ -168,13 +217,13 @@ def main():
         end_time = time.perf_counter()
         latency = end_time - start_time
         latencies.append(latency)
-    
+
     # Calculate statistics
     latencies = np.array(latencies)
     avg_latency = np.mean(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
-    
+
     # Print results
     print(f"\nResults for processing {len(prompts)} prompts:")
     print(f"Average latency: {avg_latency:.4f} seconds")
@@ -186,19 +235,21 @@ def main():
         print(f"Output: {output.outputs[0].text}")
     for percentage, percentile in zip(percentages, percentiles):
         print(f"{percentage}% percentile latency: {percentile:.4f} seconds")
-    
+
     # Output JSON results if specified
     if args.output_json:
-        results_data = { # Renamed to avoid conflict with 'results' from process_prompts
-            "model": args.model,
-            "num_prompts": len(prompts),
-            "batch_size": args.batch_size,
-            "output_len": args.output_len,
-            "avg_latency": float(avg_latency),
-            "avg_latency_per_prompt": float(avg_latency / len(prompts)),
-            "latencies": latencies.tolist(),
-            "percentiles": dict(zip(percentages, percentiles.tolist())),
-        }
+        results_data = (
+            {  # Renamed to avoid conflict with 'results' from process_prompts
+                "model": args.model,
+                "num_prompts": len(prompts),
+                "batch_size": args.batch_size,
+                "output_len": args.output_len,
+                "avg_latency": float(avg_latency),
+                "avg_latency_per_prompt": float(avg_latency / len(prompts)),
+                "latencies": latencies.tolist(),
+                "percentiles": dict(zip(percentages, percentiles.tolist())),
+            }
+        )
         with open(args.output_json, "w") as f:
             json.dump(results_data, f, indent=4)
         print(f"Results saved to {args.output_json}")
@@ -209,7 +260,7 @@ def main():
             print("\nPerforming an extra forward pass with FLASHINFER backend...")
             with global_force_attn_backend_context_manager(_Backend.FLASHINFER):
                 del llm
-                    # Initialize model
+                # Initialize model
                 llm = LLM(
                     model=args.model,
                     enforce_eager=args.enforce_eager,
@@ -219,10 +270,13 @@ def main():
                 extra_outputs = process_prompts()
                 end_time_extra = time.perf_counter()
                 latency_extra = end_time_extra - start_time_extra
-                print(f"Extra forward pass with FLASHINFER took: {latency_extra:.4f} seconds")
+                print(
+                    f"Extra forward pass with FLASHINFER took: {latency_extra:.4f} seconds"
+                )
                 # Optionally, do something with extra_outputs
         else:
             print("\nFLASHINFER backend not available, skipping extra forward pass.")
+
 
 if __name__ == "__main__":
     main()

@@ -40,10 +40,6 @@ from py_bok import (
     AttentionOp,
 )
 
-USING_BOK = True
-
-BOK_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
-
 logger = init_logger(__name__)
 
 
@@ -246,13 +242,7 @@ class BokMetadataBuilder:
         print("cyclic_attention_window_size", cyclic_attention_window_size)
 
         fp8_output_scaling = torch.tensor(
-            [1.0], device=torch.device("cuda"), dtype=torch.float32
-        )
-        kv_scale_orig_quant = torch.tensor(
-            [1.0], device=torch.device("cuda"), dtype=torch.float32
-        )
-        kv_scale_quant_orig = torch.tensor(
-            [1.0], device=torch.device("cuda"), dtype=torch.float32
+            [100.0], device=torch.device("cuda"), dtype=torch.float32
         )
 
         # TODO: check if max_num_seqs == max_batch_size
@@ -264,7 +254,7 @@ class BokMetadataBuilder:
 
         # TODO: what this do
         self.output_scaling_factor = torch.tensor(
-            [1.0],
+            [100.0],
             device=torch.device("cuda"),
             dtype=torch.float32,
         )
@@ -280,8 +270,6 @@ class BokMetadataBuilder:
             maxAttentionWindowSize=max_attention_window_size,
             cyclicAttentionWindowSize=cyclic_attention_window_size,
             fp8OutputScaling=fp8_output_scaling,
-            kvScaleOrigQuant=kv_scale_orig_quant,
-            kvScaleQuantOrig=kv_scale_quant_orig,
             multiBlockSemaphores=multi_block_semaphores,
             enableSpeculativeDecoding=False,
         )
@@ -500,9 +488,6 @@ class BokImpl(AttentionImpl):
         seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
         kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
         kv_cache_data_ptr = kv_cache.data_ptr()
-        output = output.to(
-            dtype=torch.int8
-        )  # TODO: yeah, this is a hack and it won't work probably
         cuda_stream = torch.cuda.current_stream().cuda_stream
 
         # Debug prints to understand parameter types and shapes
@@ -540,11 +525,6 @@ class BokImpl(AttentionImpl):
             "attn_metadata.input_sequence_lengths_device",
             attn_metadata.input_sequence_lengths_device,
         )
-        print("query.shape", query.shape)
-        print("query.dtype", query.dtype)
-        print("query.device", query.device)
-        print("query", query)
-        output.fill_(1) # See if we will the output with zero or if everything just stays with the value it has going in.
         forward_inplace(
             op=attn_metadata.op,
             qkv=query,
@@ -560,7 +540,7 @@ class BokImpl(AttentionImpl):
             kvCachePoolPtr=kv_cache_data_ptr,
             outputScalingFactor=attn_metadata.output_scaling_factor,
             rotaryCosSin=attn_metadata.rotary_cos_sin,
-            output=output,
+            output=output.view(torch.int8),
             workspace=attn_metadata.workspace,
             stream=cuda_stream,
         )
