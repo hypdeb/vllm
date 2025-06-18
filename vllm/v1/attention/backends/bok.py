@@ -154,6 +154,8 @@ class BokMetadata:
     num_prefill_requests: int
     seq_lens_gpu: torch.Tensor
     seq_lens_cpu: torch.Tensor
+    input_sequence_lengths_host: torch.Tensor
+    input_sequence_lengths_device: torch.Tensor
     output_scaling_factor: torch.Tensor
     workspace: torch.Tensor
     rotary_cos_sin: torch.Tensor
@@ -385,13 +387,21 @@ class BokMetadataBuilder:
 
         seq_lens_gpu = common_attn_metadata.seq_lens
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-
+        input_sequence_lengths_device = common_attn_metadata.query_start_loc.diff().to(
+            dtype=torch.uint32
+        )
+        input_sequence_lengths_host = input_sequence_lengths_device.to(
+            device=torch.device("cpu"),
+        )
+        print("input_sequence_lengths_device", input_sequence_lengths_device)
         attn_metadata = BokMetadata(
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
             num_prefill_requests=self._num_prefill_requests,
             seq_lens_gpu=seq_lens_gpu,
             seq_lens_cpu=seq_lens_cpu,
+            input_sequence_lengths_host=input_sequence_lengths_host,
+            input_sequence_lengths_device=input_sequence_lengths_device,
             output_scaling_factor=self.output_scaling_factor,
             workspace=self.workspace,
             rotary_cos_sin=self.rotary_cos_sin,
@@ -518,25 +528,46 @@ class BokImpl(AttentionImpl):
         # print(f"Expected signature from error:")
         # print(f"  forward_inplace(op, qkv, numContextRequests, inputSequenceLengthsHost, inputSequenceLengthsDevice, sequenceLengthsDevice, sequenceLengthsHost, kvCacheBlockOffsets, kvCachePoolPtr, outputScalingFactor, rotaryCosSin, output, workspace, stream)")
 
+        print("query.shape", query.shape)
+        print("attn_metadata.num_prefill_requests", attn_metadata.num_prefill_requests)
+        print("attn_metadata.context_chunk_size", attn_metadata.context_chunk_size)
+        print("seq_lens_cpu_uint32", seq_lens_cpu_uint32)
+        print(
+            "attn_metadata.input_sequence_lengths_host",
+            attn_metadata.input_sequence_lengths_host,
+        )
+        print(
+            "attn_metadata.input_sequence_lengths_device",
+            attn_metadata.input_sequence_lengths_device,
+        )
+        print("query.shape", query.shape)
+        print("query.dtype", query.dtype)
+        print("query.device", query.device)
+        print("query", query)
+        output.fill_(1) # See if we will the output with zero or if everything just stays with the value it has going in.
         forward_inplace(
-            attn_metadata.op,
-            query,
-            attn_metadata.num_prefill_requests,
-            attn_metadata.context_chunk_size,
+            op=attn_metadata.op,
+            qkv=query,
+            numContextRequests=attn_metadata.num_prefill_requests,
+            contextChunkSize=attn_metadata.context_chunk_size,
             # TODO: see how to get actual input seqlens
             # TODO: see how to skip / workaround the uint cast
-            seq_lens_cpu_uint32,
-            seq_lens_gpu_uint32,
-            seq_lens_gpu_uint32,
-            seq_lens_cpu_uint32,
-            kv_cache_block_offsets_uint32,
-            kv_cache_data_ptr,
-            attn_metadata.output_scaling_factor,
-            attn_metadata.rotary_cos_sin,
-            output,
-            attn_metadata.workspace,
-            cuda_stream,
+            inputSequenceLengthsHost=attn_metadata.input_sequence_lengths_host,
+            inputSequenceLengthsDevice=attn_metadata.input_sequence_lengths_device,
+            sequenceLengthsDevice=seq_lens_gpu_uint32,
+            sequenceLengthsHost=seq_lens_cpu_uint32,
+            kvCacheBlockOffsets=kv_cache_block_offsets_uint32,
+            kvCachePoolPtr=kv_cache_data_ptr,
+            outputScalingFactor=attn_metadata.output_scaling_factor,
+            rotaryCosSin=attn_metadata.rotary_cos_sin,
+            output=output,
+            workspace=attn_metadata.workspace,
+            stream=cuda_stream,
         )
+        print("output.shape", output.shape)
+        print("output.dtype", output.dtype)
+        print("output.device", output.device)
+        print("output", output.view(torch.float8_e4m3fn))
         return output
 
 
@@ -603,42 +634,3 @@ def create_sinusoidal_positions_for_attention_plugin(
     )  # np.cos(sinusoid_inp).shape = (32768, 64, 1)
 
     return inv_freq, concat.astype(dtype).reshape(num_pos, dim)
-
-
-# TODO: delete this?
-def identity_rotary_cos_sin(
-    rotary_embedding_parameters: RotaryEmbedding,
-) -> torch.Tensor:
-    """
-    Creates a rotary positional embedding cosine and sine cache for a given rotary embedding, where
-    all the cosine values are ones and all the sine values are zero,
-    which should create an identity embedding, i.e. an embedding that does nothing.
-    """
-
-    # One vector of ones for the cos values.
-    cos_values = torch.ones(
-        rotary_embedding_parameters.rotaryEmbeddingMaxPositions,
-        rotary_embedding_parameters.rotaryEmbeddingDim,
-        device=torch.device("cuda"),
-        dtype=torch.float32,
-    )
-
-    # One vector of zeros for the sin values.
-    sin_values = torch.zeros(
-        rotary_embedding_parameters.rotaryEmbeddingMaxPositions,
-        rotary_embedding_parameters.rotaryEmbeddingDim,
-        device=torch.device("cuda"),
-        dtype=torch.float32,
-    )
-
-    print("sin_values.shape", sin_values.shape)
-    print("cos_values.shape", cos_values.shape)
-    # Stack them together to get the cos and sin values for each position.
-    result = torch.stack([cos_values, sin_values], dim=2)
-    print("result.shape", result.shape)
-    assert result.shape == (
-        rotary_embedding_parameters.rotaryEmbeddingMaxPositions,
-        rotary_embedding_parameters.rotaryEmbeddingDim,
-        2,
-    )
-    return result
