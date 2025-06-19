@@ -11,13 +11,14 @@ import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import CacheConfig, get_current_vllm_config
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group,
-                                          is_v1_kv_transfer_group)
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+    is_v1_kv_transfer_group,
+)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
@@ -109,16 +110,19 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
 
-        quant_method = quant_config.get_quant_method(
-            self, prefix=prefix) if quant_config else None
+        quant_method = (
+            quant_config.get_quant_method(self, prefix=prefix) if quant_config else None
+        )
         if quant_method is not None and not isinstance(
-                quant_method, UnquantizedLinearMethod):
+            quant_method, UnquantizedLinearMethod
+        ):
             assert isinstance(quant_method, BaseKVCacheMethod)
             # TODO (mgoin): kv cache dtype should be specified in the FP8
             # checkpoint config and become the "auto" behavior
             if self.kv_cache_dtype == "fp8_e5m2":
-                raise ValueError("fp8_e5m2 kv-cache is not supported with "
-                                 "fp8 checkpoints.")
+                raise ValueError(
+                    "fp8_e5m2 kv-cache is not supported with " "fp8 checkpoints."
+                )
             # If quantization is enabled, we make "k_scale" and "v_scale"
             # parameters so that it can be loaded from the model checkpoint.
             # The k/v_scale will then be converted back to native float32
@@ -129,18 +133,30 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype,
-                                        block_size,
-                                        is_attention_free,
-                                        blocksparse_params is not None,
-                                        use_mla=use_mla)
+        attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            is_attention_free,
+            blocksparse_params is not None,
+            use_mla=use_mla,
+        )
         impl_cls = attn_backend.get_impl_cls()
-        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type,
-                             kv_sharing_target_layer_name, **extra_impl_args)
+        self.impl = impl_cls(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            blocksparse_params,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **extra_impl_args,
+        )
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
@@ -148,8 +164,9 @@ class Attention(nn.Module):
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda_alike(
-        ) and not current_platform.is_cpu()
+        self.use_direct_call = (
+            not current_platform.is_cuda_alike() and not current_platform.is_cpu()
+        )
 
         self.use_output = attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
@@ -162,7 +179,8 @@ class Attention(nn.Module):
         if kv_sharing_target_layer_name is not None:
             if not envs.VLLM_USE_V1:
                 raise NotImplementedError(
-                    "Cross-layer KV sharing is not supported in V0.")
+                    "Cross-layer KV sharing is not supported in V0."
+                )
 
             validate_kv_sharing_target(
                 prefix,
@@ -175,8 +193,10 @@ class Attention(nn.Module):
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = [
-            torch.tensor([]) for _ in range(get_current_vllm_config(
-            ).parallel_config.pipeline_parallel_size)
+            torch.tensor([])
+            for _ in range(
+                get_current_vllm_config().parallel_config.pipeline_parallel_size
+            )
         ]
 
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
@@ -232,16 +252,13 @@ class Attention(nn.Module):
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(self,
-                                  query,
-                                  key,
-                                  value,
-                                  self_kv_cache,
-                                  attn_metadata,
-                                  output=output)
+                self.impl.forward(
+                    self, query, key, value, self_kv_cache, attn_metadata, output=output
+                )
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query, key, value, output, self.layer_name
+                )
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -250,11 +267,13 @@ class Attention(nn.Module):
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, attn_metadata)
+                return self.impl.forward(
+                    self, query, key, value, self_kv_cache, attn_metadata
+                )
             else:
                 return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name)
+                    query, key, value, self.layer_name
+                )
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
@@ -300,11 +319,13 @@ class MultiHeadAttention(nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype=None,
-                                        block_size=16,
-                                        is_attention_free=False)
+        attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype=None,
+            block_size=16,
+            is_attention_free=False,
+        )
         backend = backend_name_to_enum(attn_backend.get_name())
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
@@ -340,22 +361,17 @@ class MultiHeadAttention(nn.Module):
         if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
-            out = xops.memory_efficient_attention_forward(query,
-                                                          key,
-                                                          value,
-                                                          scale=self.scale)
+            out = xops.memory_efficient_attention_forward(
+                query, key, value, scale=self.scale
+            )
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            query, key, value = (x.transpose(1, 2)
-                                 for x in (query, key, value))
-            out = F.scaled_dot_product_attention(query,
-                                                 key,
-                                                 value,
-                                                 scale=self.scale)
+            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
         elif self.attn_backend == _Backend.PALLAS_VLLM_V1:
-            query, key, value = (x.transpose(1, 2)
-                                 for x in (query, key, value))
+            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention
+
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
 
@@ -390,8 +406,7 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
-    connector.save_kv_layer(layer_name, kv_cache_layer,
-                            attn_metadata[layer_name])
+    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata[layer_name])
 
 
 def unified_attention(
@@ -408,8 +423,7 @@ def unified_attention(
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, query, key, value, kv_cache,
-                               attn_metadata)
+    output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output

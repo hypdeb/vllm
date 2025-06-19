@@ -158,6 +158,7 @@ class BokMetadata:
     block_table: BlockTable
     num_reqs: int
     context_chunk_size: int
+    fp8_output_buffer: torch.Tensor
 
 
 class BokMetadataBuilder:
@@ -234,30 +235,31 @@ class BokMetadataBuilder:
             block_table.max_num_blocks_per_req  # TODO: check correctness
         )
 
-        print("model config", runner.vllm_config.model_config)
-        print("model config", runner.vllm_config.model_config.hf_config)
         max_attention_window_size = runner.vllm_config.model_config.max_model_len
-        print("max_attention_window_size", max_attention_window_size)
         cyclic_attention_window_size = runner.vllm_config.model_config.max_model_len
-        print("cyclic_attention_window_size", cyclic_attention_window_size)
 
         fp8_output_scaling = torch.tensor(
-            [100.0], device=torch.device("cuda"), dtype=torch.float32
-        )
+            [1.0],
+            device=torch.device("cuda"),
+            dtype=torch.float32,
+            requires_grad=False,
+        ).contiguous()
 
         # TODO: check if max_num_seqs == max_batch_size
         multi_block_semaphores = torch.zeros(
             runner.num_query_heads * runner.scheduler_config.max_num_seqs,
             device=torch.device("cuda"),
             dtype=torch.int32,
-        )
+            requires_grad=False,
+        ).contiguous()
 
         # TODO: what this do
         self.output_scaling_factor = torch.tensor(
-            [100.0],
+            [1.0],
             device=torch.device("cuda"),
             dtype=torch.float32,
-        )
+            requires_grad=False,
+        ).contiguous()
 
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
@@ -281,11 +283,12 @@ class BokMetadataBuilder:
         )
 
         self.workspace = torch.zeros(
-            workspace_size, device=torch.device("cuda"), dtype=torch.int8
-        )
+            workspace_size,
+            device=torch.device("cuda"),
+            dtype=torch.int8,
+            requires_grad=False,
+        ).contiguous()
 
-        # self.rotary_cos_sin = identity_rotary_cos_sin(rotary_positional_embedding)
-        # print("new rotary_cos_sin.shape", self.rotary_cos_sin.shape)
         _, rotary_cos_sin_ndarray = create_sinusoidal_positions_for_attention_plugin(
             rotary_positional_embedding.rotaryEmbeddingMaxPositions,
             rotary_positional_embedding.rotaryEmbeddingDim,
@@ -293,15 +296,21 @@ class BokMetadataBuilder:
             rotary_positional_embedding.rotaryEmbeddingScale,
             rotary_positional_embedding.rotaryScalingType,
         )
-        print("rotary_cos_sin_ndarray.shape", rotary_cos_sin_ndarray.shape)
         self.rotary_cos_sin = torch.tensor(
             rotary_cos_sin_ndarray,
             dtype=torch.float32,
             device="cuda",
-        )
+            requires_grad=False,
+        ).contiguous()
 
-        print("new rotary_cos_sin.device", self.rotary_cos_sin.device)
-        print("old rotary_cos_sin.shape", self.rotary_cos_sin.shape)
+        self.fp8_output_buffer = torch.zeros(
+            self.runner.max_num_tokens,
+            self.runner.num_query_heads,
+            self.runner.vllm_config.model_config.get_head_size(),
+            device=torch.device("cuda"),
+            dtype=torch.float8_e4m3fn,
+            requires_grad=False,
+        ).contiguous()
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False  # TODO: implement this
@@ -381,7 +390,6 @@ class BokMetadataBuilder:
         input_sequence_lengths_host = input_sequence_lengths_device.to(
             device=torch.device("cpu"),
         )
-        print("input_sequence_lengths_device", input_sequence_lengths_device)
         attn_metadata = BokMetadata(
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
@@ -396,6 +404,7 @@ class BokMetadataBuilder:
             block_table=self.block_table,
             num_reqs=num_reqs,
             context_chunk_size=self.context_chunk_size,
+            fp8_output_buffer=self.fp8_output_buffer,
         )
 
         return attn_metadata
@@ -477,54 +486,12 @@ class BokImpl(AttentionImpl):
         vanilla_block_table = attn_metadata.block_table.block_table
 
         kv_cache_block_offsets = vanilla_block_table[: attn_metadata.num_reqs, :]
-        # print("selected_vanilla_block_table.shape", selected_vanilla_block_table.shape)
-        # k_offsets = selected_vanilla_block_table*2
-        # v_offsets = selected_vanilla_block_table*2 + 1
-        # kv_cache_block_offsets = torch.stack([k_offsets, v_offsets], dim=0)
-        # print("kv_cache_block_offsets.shape", kv_cache_block_offsets.shape)
-        # kv_cache_block_offsets = kv_cache_block_offsets.view((attn_metadata.num_reqs, 2* attn_metadata.block_table.max_num_blocks_per_req))
-
         seq_lens_cpu_uint32 = attn_metadata.seq_lens_cpu.to(torch.uint32)
         seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
         kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
         kv_cache_data_ptr = kv_cache.data_ptr()
         cuda_stream = torch.cuda.current_stream().cuda_stream
 
-        # Debug prints to understand parameter types and shapes
-        # print(f"DEBUG forward_inplace parameters:")
-        # print(f"  op type: {type(attn_metadata.op)}")
-        # print(f"  query type: {type(query)}, shape: {query.shape}, dtype: {query.dtype}, device: {query.device}")
-        # print(f"  num_prefill_requests type: {type(attn_metadata.num_prefill_requests)}, value: {attn_metadata.num_prefill_requests}")
-
-        # print(f"  seq_lens_cpu_uint32 type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
-        # print(f"  seq_lens_gpu_uint32 type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
-        # print(f"  seq_lens_gpu_uint32 (repeat) type: {type(seq_lens_gpu_uint32)}, shape: {seq_lens_gpu_uint32.shape}, dtype: {seq_lens_gpu_uint32.dtype}, device: {seq_lens_gpu_uint32.device}")
-        # print(f"  seq_lens_cpu_uint32 (repeat) type: {type(seq_lens_cpu_uint32)}, shape: {seq_lens_cpu_uint32.shape}, dtype: {seq_lens_cpu_uint32.dtype}, device: {seq_lens_cpu_uint32.device}")
-        # print(f"  kv_cache_block_offsets_uint32 type: {type(kv_cache_block_offsets_uint32)}, shape: {kv_cache_block_offsets_uint32.shape}, dtype: {kv_cache_block_offsets_uint32.dtype}, device: {kv_cache_block_offsets_uint32.device}")
-
-        # print(f"  kv_cache_data_ptr type: {type(kv_cache_data_ptr)}, value: {kv_cache_data_ptr}")
-        # print(f"  output_scaling_factor type: {type(attn_metadata.output_scaling_factor)}, shape: {attn_metadata.output_scaling_factor.shape}, dtype: {attn_metadata.output_scaling_factor.dtype}, device: {attn_metadata.output_scaling_factor.device}")
-        # print(f"  rotary_cos_sin type: {type(attn_metadata.rotary_cos_sin)}, shape: {attn_metadata.rotary_cos_sin.shape}, dtype: {attn_metadata.rotary_cos_sin.dtype}, device: {attn_metadata.rotary_cos_sin.device}")
-        # print(f"  output type: {type(output)}, shape: {output.shape}, dtype: {output.dtype}, device: {output.device}")
-        # print(f"  workspace type: {type(attn_metadata.workspace)}, shape: {attn_metadata.workspace.shape}, dtype: {attn_metadata.workspace.dtype}, device: {attn_metadata.workspace.device}")
-
-        # print(f"  cuda_stream type: {type(cuda_stream)}, value: {cuda_stream}")
-
-        # print(f"Expected signature from error:")
-        # print(f"  forward_inplace(op, qkv, numContextRequests, inputSequenceLengthsHost, inputSequenceLengthsDevice, sequenceLengthsDevice, sequenceLengthsHost, kvCacheBlockOffsets, kvCachePoolPtr, outputScalingFactor, rotaryCosSin, output, workspace, stream)")
-
-        print("query.shape", query.shape)
-        print("attn_metadata.num_prefill_requests", attn_metadata.num_prefill_requests)
-        print("attn_metadata.context_chunk_size", attn_metadata.context_chunk_size)
-        print("seq_lens_cpu_uint32", seq_lens_cpu_uint32)
-        print(
-            "attn_metadata.input_sequence_lengths_host",
-            attn_metadata.input_sequence_lengths_host,
-        )
-        print(
-            "attn_metadata.input_sequence_lengths_device",
-            attn_metadata.input_sequence_lengths_device,
-        )
         forward_inplace(
             op=attn_metadata.op,
             qkv=query,
@@ -540,14 +507,14 @@ class BokImpl(AttentionImpl):
             kvCachePoolPtr=kv_cache_data_ptr,
             outputScalingFactor=attn_metadata.output_scaling_factor,
             rotaryCosSin=attn_metadata.rotary_cos_sin,
-            output=output.view(torch.int8),
+            output=attn_metadata.fp8_output_buffer.view(torch.int8),
             workspace=attn_metadata.workspace,
             stream=cuda_stream,
         )
-        print("output.shape", output.shape)
-        print("output.dtype", output.dtype)
-        print("output.device", output.device)
-        print("output", output.view(torch.float8_e4m3fn))
+
+        # TODO: copying fp8 kernel outputs to the bf16 output tensor expected by vLLM, or figure out how to enable fp8 output, although it seems tied to input dtype at this point.
+        output.copy_(attn_metadata.fp8_output_buffer[: output.shape[0], :, :])
+
         return output
 
 

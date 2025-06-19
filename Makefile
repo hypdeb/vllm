@@ -71,7 +71,7 @@ vllm-sample-flashattn:
 	VLLM_ATTENTION_BACKEND=FLASHATTN python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
 
 vllm-sample-bok:
-	VLLM_ATTENTION_BACKEND=BOK python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt 
+	VLLM_ATTENTION_BACKEND=BOK python vllm_sample.py --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt 
 
 build-model8b-edgar4:
 	python benchmarks/cpp/prepare_dataset.py --stdout --tokenizer=meta-llama/Llama-3.1-8B token-norm-dist --num-requests=30 --input-mean=2048 --output-mean=128 --input-stdev=0 --output-stdev=0  > ./tmp/synthetic_2048_128.txt
