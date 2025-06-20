@@ -7,17 +7,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, List
 
 import torch
+import numpy as np
+import math
 
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
 )
-from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
@@ -78,72 +76,6 @@ class BokAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class PerLayerParameters:
-    """
-    Currently, Bok backend only support models in which all layers share
-    the same values for the following hyperparameters.
-    """
-
-    window_left: int
-    logits_soft_cap: Optional[float]
-    sm_scale: float
-
-
-def get_per_layer_parameters(vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
-    """
-    Scan all attention layers and determine some hyperparameters
-    to use during `plan`.
-    """
-
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
-    per_layer_params: dict[str, PerLayerParameters] = {}
-
-    for key, layer in layers.items():
-        impl = layer.impl
-        assert isinstance(impl, BokImpl)
-
-        # Infer hyperparameters from the attention layer
-        window_size = impl.sliding_window
-        window_left = window_size[0] if window_size is not None else -1
-        logits_soft_cap = impl.logits_soft_cap
-        sm_scale = impl.scale
-
-        per_layer_params[key] = PerLayerParameters(
-            window_left, logits_soft_cap, sm_scale
-        )
-
-    return per_layer_params
-
-
-def infer_global_hyperparameters(
-    per_layer_params: dict[str, PerLayerParameters],
-) -> PerLayerParameters:
-    """
-    Currently, Bok backend only support models in which all layers share
-    the same values for the following hyperparameters:
-    - `window_left`
-    - `logits_soft_cap`
-    - `sm_scale`
-
-    So this function asserts that all layers share the same values for these
-    hyperparameters and returns the global values.
-    """
-
-    assert len(per_layer_params) > 0, "No attention layers found in the model."
-
-    param_sets = list(per_layer_params.values())
-    global_params = param_sets[0]
-    for params in param_sets:
-        assert params == global_params, (
-            "Bok backend currently only supports models in which all "
-            "layers share the same values for the following hyperparameters: "
-            "`window_left`, `logits_soft_cap`, `sm_scale`."
-        )
-
-    return global_params
-
-
-@dataclass
 class BokMetadata:
     op: AttentionOp
     attention_layer_dimensions: AttentionLayerDimensions
@@ -168,12 +100,8 @@ class BokMetadataBuilder:
         kv_cache_spec: AttentionSpec,
         block_table: BlockTable,
     ):
-        print(f"runner: {runner}")
         self.runner = runner
         self._workspace_buffer = None
-
-        # Global hyperparameters shared by all attention layers
-        self.global_hyperparameters: Optional[PerLayerParameters] = None
 
         self.vllm_config = runner.vllm_config
         self.kv_cache_spec = kv_cache_spec
@@ -288,6 +216,7 @@ class BokMetadataBuilder:
                 rotary_positional_embedding.rotaryEmbeddingBase,
                 rotary_positional_embedding.rotaryEmbeddingScale,
                 rotary_positional_embedding.rotaryScalingType,
+                rope_scaling_config=rope_scaling,
             )
         )
         self.rotary_cos_sin = torch.tensor(
@@ -508,10 +437,6 @@ class BokImpl(AttentionImpl):
         # TODO: copying fp8 attention outputs to the bf16 output tensor expected by vLLM, or figure out how to enable fp8 output, although it seems tied to input dtype at this point.
         output.copy_(attn_metadata.fp8_output_buffer[: output.shape[0], :, :])
         return output
-
-
-import numpy as np
-import math
 
 
 def apply_llama3_scaling(inv_freqs: np.ndarray, rope_scaling_config: dict):
