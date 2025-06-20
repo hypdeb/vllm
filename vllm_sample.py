@@ -183,9 +183,10 @@ def main():
         model=args.model,
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
-        gpu_memory_utilization=0.3,
+        gpu_memory_utilization=0.1,
         quantization="modelopt",
         kv_cache_dtype="fp8",
+        block_size=32,
     )
 
     sampling_params = SamplingParams(

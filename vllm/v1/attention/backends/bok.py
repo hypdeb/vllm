@@ -152,7 +152,6 @@ class BokMetadata:
     seq_lens_cpu: torch.Tensor
     input_sequence_lengths_host: torch.Tensor
     input_sequence_lengths_device: torch.Tensor
-    output_scaling_factor: torch.Tensor
     workspace: torch.Tensor
     rotary_cos_sin: torch.Tensor
     block_table: BlockTable
@@ -169,6 +168,7 @@ class BokMetadataBuilder:
         kv_cache_spec: AttentionSpec,
         block_table: BlockTable,
     ):
+        print(f"runner: {runner}")
         self.runner = runner
         self._workspace_buffer = None
 
@@ -203,7 +203,6 @@ class BokMetadataBuilder:
         rotary_positional_embedding.rotaryScalingType = mapping_dict[
             rope_scaling.get("type", "none")
         ]
-        # rotary_positional_embedding.rotaryScalingType = RotaryScalingType.NONE
 
         max_position_embeddings = getattr(
             runner.vllm_config.model_config.hf_config, "max_position_embeddings", 8192
@@ -238,15 +237,8 @@ class BokMetadataBuilder:
         max_attention_window_size = runner.vllm_config.model_config.max_model_len
         cyclic_attention_window_size = runner.vllm_config.model_config.max_model_len
 
-        fp8_output_scaling = torch.tensor(
-            [1.0],
-            device=torch.device("cuda"),
-            dtype=torch.float32,
-            requires_grad=False,
-        ).contiguous()
-
         # TODO: check if max_num_seqs == max_batch_size
-        multi_block_semaphores = torch.zeros(
+        self.multi_block_semaphores = torch.zeros(
             runner.num_query_heads * runner.scheduler_config.max_num_seqs,
             device=torch.device("cuda"),
             dtype=torch.int32,
@@ -271,8 +263,8 @@ class BokMetadataBuilder:
             qScaling=1.0,
             maxAttentionWindowSize=max_attention_window_size,
             cyclicAttentionWindowSize=cyclic_attention_window_size,
-            fp8OutputScaling=fp8_output_scaling,
-            multiBlockSemaphores=multi_block_semaphores,
+            outputScalingFactor=self.output_scaling_factor,
+            multiBlockSemaphores=self.multi_block_semaphores,
             enableSpeculativeDecoding=False,
         )
         # TODO: check if max_num_seqs == max_batch_size
@@ -289,15 +281,17 @@ class BokMetadataBuilder:
             requires_grad=False,
         ).contiguous()
 
-        _, rotary_cos_sin_ndarray = create_sinusoidal_positions_for_attention_plugin(
-            rotary_positional_embedding.rotaryEmbeddingMaxPositions,
-            rotary_positional_embedding.rotaryEmbeddingDim,
-            rotary_positional_embedding.rotaryEmbeddingBase,
-            rotary_positional_embedding.rotaryEmbeddingScale,
-            rotary_positional_embedding.rotaryScalingType,
+        _, self.rotary_cos_sin_ndarray = (
+            create_sinusoidal_positions_for_attention_plugin(
+                rotary_positional_embedding.rotaryEmbeddingMaxPositions,
+                rotary_positional_embedding.rotaryEmbeddingDim,
+                rotary_positional_embedding.rotaryEmbeddingBase,
+                rotary_positional_embedding.rotaryEmbeddingScale,
+                rotary_positional_embedding.rotaryScalingType,
+            )
         )
         self.rotary_cos_sin = torch.tensor(
-            rotary_cos_sin_ndarray,
+            self.rotary_cos_sin_ndarray,
             dtype=torch.float32,
             device="cuda",
             requires_grad=False,
@@ -354,22 +348,23 @@ class BokMetadataBuilder:
         num_prefills = len(prefills)
         modified_batch = False
 
-        for i in range(1, min(num_decodes, num_prefills) + 1):
-            # If the decode is at the "back" of the batch, i, we can swap it
-            # with the prefill closest to the front of the batch
-            decode_idx = decodes[num_decodes - i]
-            if decode_idx < num_decodes:
-                break
+        # TODO: doing the wrong thing currently. Fix when moving to multiple sequences cases.
+        # for i in range(1, min(num_decodes, num_prefills) + 1):
+        #     # If the decode is at the "back" of the batch, i, we can swap it
+        #     # with the prefill closest to the front of the batch
+        #     decode_idx = decodes[num_decodes - i]
+        #     if decode_idx < num_decodes:
+        #         break
 
-            input_batch.swap_states(prefills[i - 1], decode_idx)
-            modified_batch = True
+        #     input_batch.swap_states(prefills[i - 1], decode_idx)
+        #     modified_batch = True
 
         self._num_decode_requests = num_decodes
         self._num_prefill_requests = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
 
-        return modified_batch
+        return False
 
     def build(
         self,
@@ -398,7 +393,6 @@ class BokMetadataBuilder:
             seq_lens_cpu=seq_lens_cpu,
             input_sequence_lengths_host=input_sequence_lengths_host,
             input_sequence_lengths_device=input_sequence_lengths_device,
-            output_scaling_factor=self.output_scaling_factor,
             workspace=self.workspace,
             rotary_cos_sin=self.rotary_cos_sin,
             block_table=self.block_table,
@@ -483,9 +477,9 @@ class BokImpl(AttentionImpl):
             # Profiling run.
             return output
 
-        vanilla_block_table = attn_metadata.block_table.block_table
-
-        kv_cache_block_offsets = vanilla_block_table[: attn_metadata.num_reqs, :]
+        kv_cache_block_offsets = attn_metadata.block_table.block_table[
+            : attn_metadata.num_reqs, :
+        ]
         seq_lens_cpu_uint32 = attn_metadata.seq_lens_cpu.to(torch.uint32)
         seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
         kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
@@ -505,16 +499,14 @@ class BokImpl(AttentionImpl):
             sequenceLengthsHost=seq_lens_cpu_uint32,
             kvCacheBlockOffsets=kv_cache_block_offsets_uint32,
             kvCachePoolPtr=kv_cache_data_ptr,
-            outputScalingFactor=attn_metadata.output_scaling_factor,
             rotaryCosSin=attn_metadata.rotary_cos_sin,
             output=attn_metadata.fp8_output_buffer.view(torch.int8),
             workspace=attn_metadata.workspace,
             stream=cuda_stream,
         )
 
-        # TODO: copying fp8 kernel outputs to the bf16 output tensor expected by vLLM, or figure out how to enable fp8 output, although it seems tied to input dtype at this point.
+        # TODO: copying fp8 attention outputs to the bf16 output tensor expected by vLLM, or figure out how to enable fp8 output, although it seems tied to input dtype at this point.
         output.copy_(attn_metadata.fp8_output_buffer[: output.shape[0], :, :])
-
         return output
 
 
