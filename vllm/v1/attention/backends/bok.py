@@ -128,9 +128,9 @@ class BokMetadataBuilder:
             "longrope": RotaryScalingType.LONG,
             "llama3": RotaryScalingType.LLAMA3,
         }
-        rotary_positional_embedding.rotaryScalingType = mapping_dict[
-            rope_scaling.get("type", "none")
-        ]
+        rotary_positional_embedding.rotaryScalingType = (
+            RotaryScalingType.LLAMA3
+        )  # TODO: fix.
 
         max_position_embeddings = getattr(
             runner.vllm_config.model_config.hf_config, "max_position_embeddings", 8192
@@ -173,14 +173,6 @@ class BokMetadataBuilder:
             requires_grad=False,
         ).contiguous()
 
-        # TODO: what this do
-        self.output_scaling_factor = torch.tensor(
-            [1.0],
-            device=torch.device("cuda"),
-            dtype=torch.float32,
-            requires_grad=False,
-        ).contiguous()
-
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
             inputDataType=DeviceDataType.BF16,
@@ -191,7 +183,7 @@ class BokMetadataBuilder:
             qScaling=1.0,
             maxAttentionWindowSize=max_attention_window_size,
             cyclicAttentionWindowSize=cyclic_attention_window_size,
-            outputScalingFactor=self.output_scaling_factor,
+            outputScalingFactor=1.0,
             multiBlockSemaphores=self.multi_block_semaphores,
             enableSpeculativeDecoding=False,
         )
