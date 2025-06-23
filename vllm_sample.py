@@ -189,16 +189,16 @@ def main():
         block_size=32,
     )
 
-    sampling_params = SamplingParams(
-        temperature=1.0,
-        top_p=1.0,
-        max_tokens=args.output_len,
-    )
 
     # Process prompts in batches
     def process_prompts():
         results = []
         for i in range(0, len(prompts), args.batch_size):
+            sampling_params = SamplingParams(
+                temperature=.0,
+                top_p=1.0,
+                max_tokens=args.output_len,
+            )
             batch = prompts[i : i + args.batch_size]
             outputs = llm.generate(batch, sampling_params)
             results.extend(outputs)
