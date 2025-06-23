@@ -6,6 +6,9 @@ import os
 
 from vllm.sampling_params import SamplingParams
 
+def load_prompts(prompts_file: str) -> list[str]:
+    pass
+
 def main():
     parser = argparse.ArgumentParser(description="Extract first LlamaAttention layer")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B", 
@@ -18,6 +21,9 @@ def main():
                         help="vLLM attention backend to use")
     parser.add_argument("--max-tokens", type=int, default=2,
                         help="Maximum number of tokens to generate")
+    parser.add_argument(
+        "--enforce-eager", action="store_true", help="Enforce eager execution"
+    )
     args = parser.parse_args()
     
     # Set the environment variable for the backend
@@ -28,10 +34,22 @@ def main():
     
     # Instantiate a normal vLLM engine
     print(f"Loading model: {args.model}")
+
+    if "FP8" in args.model:
+        quantization = "modelopt"
+        kv_cache_dtype = "fp8"
+    else:
+        quantization = None
+        kv_cache_dtype = "auto"
+    # Initialize model
     llm = LLM(
         model=args.model,
-        trust_remote_code=args.trust_remote_code,
-        enforce_eager=True,
+        enforce_eager=args.enforce_eager,
+        trust_remote_code=True,
+        gpu_memory_utilization=0.3,
+        quantization=quantization,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=32,
     )
     
     prompts = ["Hello, how are you?"]

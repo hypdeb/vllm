@@ -9,11 +9,17 @@ def run_cache_layer(backend: str) -> str:
     """Run cache_layer.py with specified backend and return output directory."""
     cmd = ["python", "z_hacky_layer_test/cache_layer.py", 
            "--backend", backend,
-           "--model", "meta-llama/Llama-3.1-8B"]
+           "--enforce-eager",
+           "--model", "/trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8"]
     
     print(f"\nRunning cache_layer with backend: {backend}")
+    
+    # Set up environment with VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    env = os.environ.copy()
+    env['VLLM_ALLOW_INSECURE_SERIALIZATION'] = '1'
+    
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
         print("stdout:\n", result.stdout)
         print("stderr:\n", result.stderr)
     except subprocess.CalledProcessError as e:
@@ -81,7 +87,8 @@ def compare_tensors(tensor1: Any, tensor2: Any, name: str) -> bool:
     is_close = torch.allclose(tensor1.float(), tensor2.float(), atol=1e-5, rtol=1e-4) # Added rtol for float comparison
     
     if not is_close:
-        print(f"\n\n{name} abs(tensor1 - tensor2): {torch.abs(tensor1 - tensor2)} max {torch.abs(tensor1 - tensor2).max()}")
+        pass
+        # print(f"\n\n{name} abs(tensor1 - tensor2): {torch.abs(tensor1 - tensor2)} max {torch.abs(tensor1 - tensor2).max()}")
     
     # Debugging for a specific tensor if needed
     if name == "kv_cache_post" and False:
@@ -126,7 +133,7 @@ def compare_outputs(dir1: str, dir2: str):
 def main():
     # Run with two different backends
     backend1 = "BOK"
-    backend2 = "FLASHINFER"
+    backend2 = "FLASH_ATTN"
     
     output_dir1 = run_cache_layer(backend1)
     output_dir2 = run_cache_layer(backend2)
