@@ -176,7 +176,7 @@ def main():
                     parts = line.split(',', 1)  # Split only on first comma
                     try:
                         output_length = int(parts[0].strip())
-                        prompt = parts[1].strip()
+                        prompt = parts[1].strip() if parts[1].strip() else ""
                         prompt_configs.append((output_length, prompt))
                         prompts.append(prompt)  # Keep for backward compatibility
                     except ValueError:
