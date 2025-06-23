@@ -211,13 +211,13 @@ def main():
         kv_cache_dtype = "fp8"
     else:
         quantization = None
-        kv_cache_dtype = None
+        kv_cache_dtype = "auto"
     # Initialize model
     llm = LLM(
         model=args.model,
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
-        gpu_memory_utilization=0.1,
+        gpu_memory_utilization=0.3,
         quantization=quantization,
         kv_cache_dtype=kv_cache_dtype,
         block_size=32,
@@ -274,9 +274,9 @@ def main():
     for i, (output_length, prompt) in enumerate(prompt_configs):
         if i < len(results):
             print(f"\nPair {i+1}:")
-            print(f"Output Length: {output_length}")
-            print(f"Prompt: {prompt}")
-            print(f"Output: {results[i].outputs[0].text}")
+            print(f"Output Length:{output_length}")
+            print(f"Prompt:{prompt}")
+            print(f"Output:{results[i].outputs[0].text}")
     
     for percentage, percentile in zip(percentages, percentiles):
         print(f"{percentage}% percentile latency: {percentile:.4f} seconds")
