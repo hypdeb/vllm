@@ -206,15 +206,20 @@ def main():
     print(f"Warmup iterations: {args.num_iters_warmup}")
 
     # SomeClass()
-
+    if "FP8" in args.model:
+        quantization = "modelopt"
+        kv_cache_dtype = "fp8"
+    else:
+        quantization = None
+        kv_cache_dtype = None
     # Initialize model
     llm = LLM(
         model=args.model,
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
         gpu_memory_utilization=0.1,
-        quantization="modelopt",
-        kv_cache_dtype="fp8",
+        quantization=quantization,
+        kv_cache_dtype=kv_cache_dtype,
         block_size=32,
     )
 
