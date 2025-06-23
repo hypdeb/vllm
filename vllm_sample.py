@@ -162,9 +162,38 @@ def main():
 
     # Load prompts from file if specified
     prompts = args.prompts or []
+    prompt_configs = []  # List of (output_length, prompt) tuples
+    
     if args.prompts_file:
         with open(args.prompts_file, "r", encoding="utf-8") as f:
-            prompts.extend([line.strip() for line in f if line.strip()])
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Parse format: output_length, prompt
+                if ',' in line:
+                    parts = line.split(',', 1)  # Split only on first comma
+                    try:
+                        output_length = int(parts[0].strip())
+                        prompt = parts[1].strip()
+                        prompt_configs.append((output_length, prompt))
+                        prompts.append(prompt)  # Keep for backward compatibility
+                    except ValueError:
+                        print(f"Warning: Invalid output length in line: {line}")
+                        # Treat as regular prompt if parsing fails
+                        prompts.append(line)
+                        prompt_configs.append((args.output_len, line))
+                else:
+                    # No comma, treat as regular prompt with default output length
+                    prompts.append(line)
+                    prompt_configs.append((args.output_len, line))
+    
+    # Handle command line prompts (use default output length)
+    for prompt in (args.prompts or []):
+        if prompt not in prompts:  # Avoid duplicates
+            prompts.append(prompt)
+            prompt_configs.append((args.output_len, prompt))
 
     if not prompts:
         raise ValueError("No prompts provided. Use --prompts or --prompts-file")
@@ -189,20 +218,25 @@ def main():
         block_size=32,
     )
 
-
-    # Process prompts in batches
+    # Process prompts as a batch with individual sampling parameters
     def process_prompts():
-        results = []
-        for i in range(0, len(prompts), args.batch_size):
-            sampling_params = SamplingParams(
-                temperature=.0,
-                top_p=1.0,
-                max_tokens=args.output_len,
+        # Create list of prompts and corresponding sampling parameters
+        batch_prompts = []
+        batch_sampling_params = []
+        
+        for output_length, prompt in prompt_configs:
+            batch_prompts.append(prompt)
+            batch_sampling_params.append(
+                SamplingParams(
+                    temperature=.0,
+                    top_p=1.0,
+                    max_tokens=output_length,
+                )
             )
-            batch = prompts[i : i + args.batch_size]
-            outputs = llm.generate(batch, sampling_params)
-            results.extend(outputs)
-        return results
+        
+        # Process all prompts in one batch with individual sampling parameters
+        outputs = llm.generate(batch_prompts, batch_sampling_params)
+        return outputs
 
     # Warmup runs
     print("\nWarming up...")
@@ -230,10 +264,15 @@ def main():
     print(f"Average latency: {avg_latency:.4f} seconds")
     print(f"Latency per prompt: {avg_latency / len(prompts):.4f} seconds")
     print("\nPrompt-Output Pairs:")
-    for i, (prompt, output) in enumerate(zip(prompts, results)):
-        print(f"\nPair {i+1}:")
-        print(f"Prompt: {prompt}")
-        print(f"Output: {output.outputs[0].text}")
+    
+    # Display results in original order
+    for i, (output_length, prompt) in enumerate(prompt_configs):
+        if i < len(results):
+            print(f"\nPair {i+1}:")
+            print(f"Output Length: {output_length}")
+            print(f"Prompt: {prompt}")
+            print(f"Output: {results[i].outputs[0].text}")
+    
     for percentage, percentile in zip(percentages, percentiles):
         print(f"{percentage}% percentile latency: {percentile:.4f} seconds")
 
