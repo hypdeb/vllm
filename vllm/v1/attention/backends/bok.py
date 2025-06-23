@@ -233,11 +233,16 @@ class BokMetadataBuilder:
     def reorder_batch(
         self, input_batch: InputBatch, scheduler_output: SchedulerOutput
     ) -> bool:
+        print("BOK reorder_batch")
+        print("input_batch.req_ids", input_batch.req_ids)
+        print("scheduler_output.num_scheduled_tokens", scheduler_output.num_scheduled_tokens)
+        print("input_batch.req_output_token_ids", input_batch.req_output_token_ids)
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
         # where attention is likely memory-bound and "prefill" to mean requests
         # where attention is likely compute-bound
+
         decodes = []
         prefills = []
         num_decode_tokens = 0
@@ -270,22 +275,29 @@ class BokMetadataBuilder:
         modified_batch = False
 
         # TODO: doing the wrong thing currently. Fix when moving to multiple sequences cases.
-        # for i in range(1, min(num_decodes, num_prefills) + 1):
-        #     # If the decode is at the "back" of the batch, i, we can swap it
-        #     # with the prefill closest to the front of the batch
-        #     decode_idx = decodes[num_decodes - i]
-        #     if decode_idx < num_decodes:
-        #         break
-
-        #     input_batch.swap_states(prefills[i - 1], decode_idx)
-        #     modified_batch = True
+        for i in range(1, min(num_decodes, num_prefills) + 1):
+            # If the decode is at the "back" of the batch, i, we can swap it
+            # with the prefill closest to the front of the batch
+            # decode_idx = decodes[num_decodes - i]
+            prefill_idx = prefills[num_prefills - i]
+            # prefill_idx = prefills[i - 1]
+            decode_idx = decodes[i - 1]
+            if prefill_idx < num_prefills:
+                break
+            print("Swapping prefill_idx", prefill_idx, "with decode_idx", decode_idx)
+            input_batch.swap_states(prefill_idx, decode_idx)
+            modified_batch = True
 
         self._num_decode_requests = num_decodes
         self._num_prefill_requests = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
 
-        return False
+        print("BOK reorder_batch done") 
+        print("input_batch.req_ids", input_batch.req_ids)
+        print("scheduler_output.num_scheduled_tokens", scheduler_output.num_scheduled_tokens)
+        print("input_batch.req_output_token_ids", input_batch.req_output_token_ids, "\n\n")
+        return modified_batch
 
     def build(
         self,
@@ -299,7 +311,7 @@ class BokMetadataBuilder:
         assert self._num_decode_tokens + self._num_prefill_tokens == num_actual_tokens
 
         seq_lens_gpu = common_attn_metadata.seq_lens
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
+        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs] #TODO: IS THIS UPDATED???
         input_sequence_lengths_device = common_attn_metadata.query_start_loc.diff().to(
             dtype=torch.uint32
         )
@@ -351,7 +363,7 @@ class BokImpl(AttentionImpl):
                 "Using irope in FlashInfer is not supported yet, it will fall"
                 " back to global attention for long context."
             )
-        self.scale = float(scale)
+        self.scale = float(scale) #TODO why is this needed?
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
