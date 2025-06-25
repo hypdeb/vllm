@@ -215,13 +215,9 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.attn.backend != _Backend.TKE:
-            print("Applying rotary embedding")
-            print("self.attn.backend", self.attn.backend)
-            print("self.attn", self.attn)
             q, k = self.rotary_emb(positions, q, k)
         else:
             pass
-            # print("Not applying rotary embedding")
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
