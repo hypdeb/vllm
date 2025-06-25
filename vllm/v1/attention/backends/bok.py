@@ -419,9 +419,17 @@ class BokImpl(AttentionImpl):
         kv_cache_data_ptr = kv_cache.data_ptr()
         cuda_stream = torch.cuda.current_stream().cuda_stream
 
+        qkv = torch.cat(
+            [
+                query.reshape(query.shape[0], -1),
+                key.reshape(key.shape[0], -1),
+                value.reshape(value.shape[0], -1),
+            ],
+            dim=1,
+        ).contiguous()
         forward_inplace(
             op=attn_metadata.op,
-            qkv=query,
+            qkv=qkv,
             numContextRequests=attn_metadata.num_prefill_requests,
             contextChunkSize=attn_metadata.context_chunk_size,
             # TODO: see how to get actual input seqlens
