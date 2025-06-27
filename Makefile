@@ -29,8 +29,8 @@ vllm-setup:
 	VLLM_USE_PRECOMPILED=1 pip install --editable .
 	pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
-force-reinstall-bok:
-	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git" --force-reinstall --no-input
+force-reinstall-tke:
+	pip install "trtllm-kernel-export @ git+ssh://git@gitlab.com:nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git" --force-reinstall --no-input
 run-vllm:
 	docker run -it --gpus all \
 		-v $(shell pwd):$(shell pwd) \
@@ -71,7 +71,7 @@ vllm-sample-flashattn:
 	VLLM_ATTENTION_BACKEND=FLASHATTN python vllm_sample.py --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file z_hacky_layer_test/sample_prompts.txt
 
 vllm-sample:
-	VLLM_ATTENTION_BACKEND=BOK python vllm_sample.py --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file z_hacky_layer_test/sample_prompts.txt 
+	VLLM_ATTENTION_BACKEND=TKE python vllm_sample.py --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file z_hacky_layer_test/sample_prompts.txt 
 
 build-model8b-edgar4:
 	python benchmarks/cpp/prepare_dataset.py --stdout --tokenizer=meta-llama/Llama-3.1-8B token-norm-dist --num-requests=30 --input-mean=2048 --output-mean=128 --input-stdev=0 --output-stdev=0  > ./tmp/synthetic_2048_128.txt

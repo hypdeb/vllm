@@ -1408,11 +1408,11 @@ class EngineArgs:
             will_use_fa = (
                 current_platform.is_cuda() and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
-            will_use_bok = envs.VLLM_ATTENTION_BACKEND == "BOK"
+            will_use_tke = envs.VLLM_ATTENTION_BACKEND == "TKE"
             supported = False
             if current_platform.is_rocm():
                 supported = True
-            elif fp8_attention and will_use_bok:
+            elif fp8_attention and will_use_tke:
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
@@ -1516,7 +1516,7 @@ class EngineArgs:
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
-            "BOK",
+            "TKE",
         ]
         if (
             envs.is_set("VLLM_ATTENTION_BACKEND")

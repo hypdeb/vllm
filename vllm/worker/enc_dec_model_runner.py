@@ -132,7 +132,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             if maybe_global_forced_backend not in [
                 _Backend.XFORMERS,
                 _Backend.FLASH_ATTN,
-                _Backend.BOK,
+                _Backend.TKE,
             ]:
                 raise_backend_err()
         elif is_forced_by_env_var:  # noqa: SIM102
@@ -141,7 +141,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             if maybe_env_var_forced_backend not in [
                 _Backend.XFORMERS,
                 _Backend.FLASH_ATTN,
-                _Backend.BOK,
+                _Backend.TKE,
             ]:
                 raise_backend_err()
 

@@ -33,24 +33,27 @@ logger = logging.getLogger(__name__)
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
-envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
+envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
-    logger.warning(
-        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+    logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux")
-          or sys.platform.startswith("darwin")):
+elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
     logger.warning(
         "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
-        "so vLLM may not be able to run correctly", sys.platform)
+        "so vLLM may not be able to run correctly",
+        sys.platform,
+    )
     VLLM_TARGET_DEVICE = "empty"
-elif (sys.platform.startswith("linux") and torch.version.cuda is None
-      and os.getenv("VLLM_TARGET_DEVICE") is None
-      and torch.version.hip is None):
+elif (
+    sys.platform.startswith("linux")
+    and torch.version.cuda is None
+    and os.getenv("VLLM_TARGET_DEVICE") is None
+    and torch.version.hip is None
+):
     # if cuda or hip is not available and VLLM_TARGET_DEVICE is not set,
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
@@ -84,7 +87,7 @@ def is_url_available(url: str) -> bool:
 
 class CMakeExtension(Extension):
 
-    def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
+    def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
         super().__init__(name, sources=[], py_limited_api=True, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
@@ -121,8 +124,8 @@ class cmake_build_ext(build_ext):
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
                 logger.info(
-                    "Using NVCC_THREADS=%d as the number of nvcc threads.",
-                    nvcc_threads)
+                    "Using NVCC_THREADS=%d as the number of nvcc threads.", nvcc_threads
+                )
             else:
                 nvcc_threads = 1
             num_jobs = max(1, num_jobs // nvcc_threads)
@@ -146,36 +149,36 @@ class cmake_build_ext(build_ext):
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
         cmake_args = [
-            '-DCMAKE_BUILD_TYPE={}'.format(cfg),
-            '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
+            "-DCMAKE_BUILD_TYPE={}".format(cfg),
+            "-DVLLM_TARGET_DEVICE={}".format(VLLM_TARGET_DEVICE),
         ]
 
         verbose = envs.VERBOSE
         if verbose:
-            cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
+            cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
 
         if is_sccache_available():
             cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_HIP_COMPILER_LAUNCHER=sccache',
+                "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
+                "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
+                "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache",
+                "-DCMAKE_HIP_COMPILER_LAUNCHER=sccache",
             ]
         elif is_ccache_available():
             cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache',
+                "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_HIP_COMPILER_LAUNCHER=ccache",
             ]
 
         # Pass the python executable to cmake so it can find an exact
         # match.
-        cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
+        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(sys.executable)]
 
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
-        cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
+        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(":".join(sys.path))]
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -183,7 +186,7 @@ class cmake_build_ext(build_ext):
         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
-        cmake_args += ['-DFETCHCONTENT_BASE_DIR={}'.format(fc_base_dir)]
+        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
 
         #
         # Setup parallelism and build tool
@@ -191,30 +194,31 @@ class cmake_build_ext(build_ext):
         num_jobs, nvcc_threads = self.compute_num_jobs()
 
         if nvcc_threads:
-            cmake_args += ['-DNVCC_THREADS={}'.format(nvcc_threads)]
+            cmake_args += ["-DNVCC_THREADS={}".format(nvcc_threads)]
 
         if is_ninja_available():
-            build_tool = ['-G', 'Ninja']
+            build_tool = ["-G", "Ninja"]
             cmake_args += [
-                '-DCMAKE_JOB_POOL_COMPILE:STRING=compile',
-                '-DCMAKE_JOB_POOLS:STRING=compile={}'.format(num_jobs),
+                "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
+                "-DCMAKE_JOB_POOLS:STRING=compile={}".format(num_jobs),
             ]
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda():
-            cmake_args += [f'-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc']
+            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
         subprocess.check_call(
-            ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            cwd=self.build_temp,
+        )
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
         try:
-            subprocess.check_output(['cmake', '--version'])
+            subprocess.check_output(["cmake", "--version"])
         except OSError as e:
-            raise RuntimeError('Cannot find CMake executable') from e
+            raise RuntimeError("Cannot find CMake executable") from e
 
         # Create build directory if it does not exist.
         if not os.path.exists(self.build_temp):
@@ -253,13 +257,18 @@ class cmake_build_ext(build_ext):
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
             prefix = outdir
-            for _ in range(ext.name.count('.')):
+            for _ in range(ext.name.count(".")):
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
             install_args = [
-                "cmake", "--install", ".", "--prefix", prefix, "--component",
-                target_name(ext.name)
+                "cmake",
+                "--install",
+                ".",
+                "--prefix",
+                prefix,
+                "--component",
+                target_name(ext.name),
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
@@ -270,12 +279,15 @@ class cmake_build_ext(build_ext):
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(os.path.join(self.build_lib, "vllm",
-                                       "vllm_flash_attn", "**", "*.py"),
-                          recursive=True)
+
+        files = glob.glob(
+            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "**", "*.py"),
+            recursive=True,
+        )
         for file in files:
-            dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    file.split("vllm/vllm_flash_attn/")[-1])
+            dst_file = os.path.join(
+                "vllm/vllm_flash_attn", file.split("vllm/vllm_flash_attn/")[-1]
+            )
             print(f"Copying {file} to {dst_file}")
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
@@ -291,34 +303,44 @@ class repackage_wheel(build_ext):
 
         try:
             # Get the latest commit hash of the upstream main branch.
-            resp_json = subprocess.check_output([
-                "curl", "-s",
-                "https://api.github.com/repos/vllm-project/vllm/commits/main"
-            ]).decode("utf-8")
+            resp_json = subprocess.check_output(
+                [
+                    "curl",
+                    "-s",
+                    "https://api.github.com/repos/vllm-project/vllm/commits/main",
+                ]
+            ).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
 
             # Check if the upstream_main_commit exists in the local repo
             try:
                 subprocess.check_output(
-                    ["git", "cat-file", "-e", f"{upstream_main_commit}"])
+                    ["git", "cat-file", "-e", f"{upstream_main_commit}"]
+                )
             except subprocess.CalledProcessError:
                 # If not present, fetch it from the remote repository.
                 # Note that this does not update any local branches,
                 # but ensures that this commit ref and its history are
                 # available in our local repo.
-                subprocess.check_call([
-                    "git", "fetch", "https://github.com/vllm-project/vllm",
-                    "main"
-                ])
+                subprocess.check_call(
+                    ["git", "fetch", "https://github.com/vllm-project/vllm", "main"]
+                )
 
             # Then get the commit hash of the current branch that is the same as
             # the upstream main commit.
-            current_branch = subprocess.check_output(
-                ["git", "branch", "--show-current"]).decode("utf-8").strip()
+            current_branch = (
+                subprocess.check_output(["git", "branch", "--show-current"])
+                .decode("utf-8")
+                .strip()
+            )
 
-            base_commit = subprocess.check_output([
-                "git", "merge-base", f"{upstream_main_commit}", current_branch
-            ]).decode("utf-8").strip()
+            base_commit = (
+                subprocess.check_output(
+                    ["git", "merge-base", f"{upstream_main_commit}", current_branch]
+                )
+                .decode("utf-8")
+                .strip()
+            )
             return base_commit
         except ValueError as err:
             raise ValueError(err) from None
@@ -326,12 +348,13 @@ class repackage_wheel(build_ext):
             logger.warning(
                 "Failed to get the base commit in the main branch. "
                 "Using the nightly wheel. The libraries in this "
-                "wheel may not be compatible with your dev branch: %s", err)
+                "wheel may not be compatible with your dev branch: %s",
+                err,
+            )
             return "nightly"
 
     def run(self) -> None:
-        assert _is_cuda(
-        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+        assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
 
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
         if wheel_location is None:
@@ -368,7 +391,8 @@ class repackage_wheel(build_ext):
                 from setuptools.errors import SetupError
 
                 raise SetupError(
-                    f"Failed to get vLLM wheel from {wheel_location}") from e
+                    f"Failed to get vLLM wheel from {wheel_location}"
+                ) from e
 
         with zipfile.ZipFile(wheel_path) as wheel:
             files_to_copy = [
@@ -382,20 +406,23 @@ class repackage_wheel(build_ext):
             ]
 
             file_members = list(
-                filter(lambda x: x.filename in files_to_copy, wheel.filelist))
+                filter(lambda x: x.filename in files_to_copy, wheel.filelist)
+            )
 
             # vllm_flash_attn python code:
             # Regex from
             #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
             compiled_regex = re.compile(
-                r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
+                r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
+            )
             file_members += list(
-                filter(lambda x: compiled_regex.match(x.filename),
-                       wheel.filelist))
+                filter(lambda x: compiled_regex.match(x.filename), wheel.filelist)
+            )
 
             for file in file_members:
-                print(f"Extracting and including {file.filename} "
-                      "from existing wheel")
+                print(
+                    f"Extracting and including {file.filename} " "from existing wheel"
+                )
                 package_name = os.path.dirname(file.filename).replace("/", ".")
                 file_name = os.path.basename(file.filename)
 
@@ -425,10 +452,15 @@ def _is_hpu() -> bool:
         if sys.platform.startswith("linux"):
             try:
                 output = subprocess.check_output(
-                    'lsmod | grep habanalabs | wc -l', shell=True)
+                    "lsmod | grep habanalabs | wc -l", shell=True
+                )
                 is_hpu_available = int(output) > 0
-            except (ValueError, FileNotFoundError, PermissionError,
-                    subprocess.CalledProcessError):
+            except (
+                ValueError,
+                FileNotFoundError,
+                PermissionError,
+                subprocess.CalledProcessError,
+            ):
                 pass
     return is_hpu_available
 
@@ -439,13 +471,17 @@ def _no_device() -> bool:
 
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
-    return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu() or _is_hpu()))
+    return (
+        VLLM_TARGET_DEVICE == "cuda"
+        and has_cuda
+        and not (_is_neuron() or _is_tpu() or _is_hpu())
+    )
 
 
 def _is_hip() -> bool:
-    return (VLLM_TARGET_DEVICE == "cuda"
-            or VLLM_TARGET_DEVICE == "rocm") and torch.version.hip is not None
+    return (
+        VLLM_TARGET_DEVICE == "cuda" or VLLM_TARGET_DEVICE == "rocm"
+    ) and torch.version.hip is not None
 
 
 def _is_neuron() -> bool:
@@ -488,8 +524,12 @@ def get_rocm_version():
         minor = ctypes.c_uint32()
         patch = ctypes.c_uint32()
 
-        if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
-                                  ctypes.byref(patch)) == 0):
+        if (
+            get_rocm_core_version(
+                ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch)
+            )
+            == 0
+        ):
             return f"{major.value}.{minor.value}.{patch.value}"
         return None
     except Exception:
@@ -498,9 +538,9 @@ def get_rocm_version():
 
 def get_neuronxcc_version():
     import sysconfig
+
     site_dir = sysconfig.get_paths()["purelib"]
-    version_file = os.path.join(site_dir, "neuronxcc", "version",
-                                "__init__.py")
+    version_file = os.path.join(site_dir, "neuronxcc", "version", "__init__.py")
 
     # Check if the command was executed successfully
     with open(version_file) as fp:
@@ -521,8 +561,9 @@ def get_nvcc_cuda_version() -> Version:
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
     assert CUDA_HOME is not None, "CUDA_HOME is not set"
-    nvcc_output = subprocess.check_output([CUDA_HOME + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
+    nvcc_output = subprocess.check_output(
+        [CUDA_HOME + "/bin/nvcc", "-V"], universal_newlines=True
+    )
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
@@ -534,14 +575,20 @@ def get_gaudi_sw_version():
     Returns the driver version.
     """
     # Enable console printing for `hl-smi` check
-    output = subprocess.run("hl-smi",
-                            shell=True,
-                            text=True,
-                            capture_output=True,
-                            env={"ENABLE_CONSOLE": "true"})
+    output = subprocess.run(
+        "hl-smi",
+        shell=True,
+        text=True,
+        capture_output=True,
+        env={"ENABLE_CONSOLE": "true"},
+    )
     if output.returncode == 0 and output.stdout:
-        return output.stdout.split("\n")[2].replace(
-            " ", "").split(":")[1][:-1].split("-")[0]
+        return (
+            output.stdout.split("\n")[2]
+            .replace(" ", "")
+            .split(":")[1][:-1]
+            .split("-")[0]
+        )
     return "0.0.0"  # when hl-smi is not available
 
 
@@ -603,8 +650,11 @@ def get_requirements() -> list[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif not line.startswith("--") and not line.startswith(
-                    "#") and line.strip() != "":
+            elif (
+                not line.startswith("--")
+                and not line.startswith("#")
+                and line.strip() != ""
+            ):
                 resolved_requirements.append(line)
         return resolved_requirements
 
@@ -615,16 +665,16 @@ def get_requirements() -> list[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if ("vllm-flash-attn" in req and cuda_major != "12"):
+            if "vllm-flash-attn" in req and cuda_major != "12":
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
-        # Add direct dependency on BOK project for CUDA builds
-        # requirements.append(
-        #     "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"
-        # )
+        # Add direct dependency on TKE project for CUDA builds
+        requirements.append(
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git"
+        )
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
@@ -639,8 +689,8 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
-            "or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, " "or CPU."
+        )
     return requirements
 
 
@@ -656,12 +706,10 @@ if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
         # FA3 requires CUDA 12.3 or later
-        ext_modules.append(
-            CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+        ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
-        ext_modules.append(
-            CMakeExtension(name="vllm._flashmla_C", optional=True))
+        ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
@@ -682,8 +730,7 @@ if not ext_modules:
     cmdclass = {}
 else:
     cmdclass = {
-        "build_ext":
-        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+        "build_ext": repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
 setup(
@@ -698,7 +745,9 @@ setup(
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
-        "bok": ["bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"]  # BOK project for CUDA builds
+        "tke": [
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git"
+        ],  # TKE project for CUDA builds
     },
     cmdclass=cmdclass,
     package_data=package_data,

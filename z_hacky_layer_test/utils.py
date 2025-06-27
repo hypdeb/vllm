@@ -1,5 +1,5 @@
 from typing import Tuple
-from py_bok import AttentionLayerDimensions, DeviceDataType, RotaryEmbedding
+from py_tke import AttentionLayerDimensions, DeviceDataType, RotaryEmbedding
 import torch
 
 

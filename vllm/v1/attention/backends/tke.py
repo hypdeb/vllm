@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from py_bok import (
+from py_tke import (
     create_op,
     forward_inplace,
     calculate_workspace_size,
@@ -41,7 +41,7 @@ from py_bok import (
 logger = init_logger(__name__)
 
 
-class BokAttentionBackend(AttentionBackend):
+class TkeAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
 
@@ -51,19 +51,19 @@ class BokAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "BOK"
+        return "TKE"
 
     @staticmethod
-    def get_impl_cls() -> type[BokImpl]:
-        return BokImpl
+    def get_impl_cls() -> type[TkeImpl]:
+        return TkeImpl
 
     @staticmethod
-    def get_metadata_cls() -> type[BokMetadata]:
-        return BokMetadata
+    def get_metadata_cls() -> type[TkeMetadata]:
+        return TkeMetadata
 
     @staticmethod
-    def get_builder_cls() -> type[BokMetadataBuilder]:
-        return BokMetadataBuilder
+    def get_builder_cls() -> type[TkeMetadataBuilder]:
+        return TkeMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -76,7 +76,7 @@ class BokAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class BokMetadata:
+class TkeMetadata:
     op: AttentionOp
     attention_layer_dimensions: AttentionLayerDimensions
     num_prefill_requests: int
@@ -92,7 +92,7 @@ class BokMetadata:
     fp8_output_buffer: torch.Tensor
 
 
-class BokMetadataBuilder:
+class TkeMetadataBuilder:
 
     def __init__(
         self,
@@ -233,31 +233,34 @@ class BokMetadataBuilder:
     def reorder_batch(
         self, input_batch: InputBatch, scheduler_output: SchedulerOutput
     ) -> bool:
-        print("BOK reorder_batch")
-        print("input_batch.req_ids", input_batch.req_ids)
-        print("scheduler_output.num_scheduled_tokens", scheduler_output.num_scheduled_tokens)
-        print("input_batch.req_output_token_ids", input_batch.req_output_token_ids)
+        # print("TKE reorder_batch")
+        # print("input_batch.req_ids", input_batch.req_ids)
+        # print(
+        #     "scheduler_output.num_scheduled_tokens",
+        #     scheduler_output.num_scheduled_tokens,
+        # )
+        # print("input_batch.req_output_token_ids", input_batch.req_output_token_ids)
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
         # where attention is likely memory-bound and "prefill" to mean requests
         # where attention is likely compute-bound
 
-        decodes = []
-        prefills = []
-        num_decode_tokens = 0
-        num_prefill_tokens = 0
+        decode_indexes: List[int] = []
+        prefill_indexes: List[int] = []
+        num_decode_tokens: int = 0
+        num_prefill_tokens: int = 0
 
-        for i, req_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        for index_in_batch, request_id in enumerate(input_batch.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens[request_id]
             # for now treat 1 scheduled token as "decode" even if its not,
             # we should update this to something like < 8 in the future but
             # currently the decode run only supports num_tokens = 1
             if num_tokens == 1:
-                decodes.append(i)
+                decode_indexes.append(index_in_batch)
                 num_decode_tokens += num_tokens
             else:
-                prefills.append(i)
+                prefill_indexes.append(index_in_batch)
                 num_prefill_tokens += num_tokens
 
         # We hope that this is fairly minimal since decodes
@@ -270,8 +273,8 @@ class BokMetadataBuilder:
         # prefills from the front of the batch.
         # `decodes` and `prefills` are already in ascending order just based on
         # the above loop
-        num_decodes = len(decodes)
-        num_prefills = len(prefills)
+        num_decodes = len(decode_indexes)
+        num_prefills = len(prefill_indexes)
         modified_batch = False
 
         # TODO: doing the wrong thing currently. Fix when moving to multiple sequences cases.
@@ -279,12 +282,12 @@ class BokMetadataBuilder:
             # If the decode is at the "back" of the batch, i, we can swap it
             # with the prefill closest to the front of the batch
             # decode_idx = decodes[num_decodes - i]
-            prefill_idx = prefills[num_prefills - i]
+            prefill_idx = prefill_indexes[num_prefills - i]
             # prefill_idx = prefills[i - 1]
-            decode_idx = decodes[i - 1]
+            decode_idx = decode_indexes[i - 1]
             if prefill_idx < num_prefills:
                 break
-            print("Swapping prefill_idx", prefill_idx, "with decode_idx", decode_idx)
+            # print("Swapping prefill_idx", prefill_idx, "with decode_idx", decode_idx)
             input_batch.swap_states(prefill_idx, decode_idx)
             modified_batch = True
 
@@ -293,10 +296,15 @@ class BokMetadataBuilder:
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
 
-        print("BOK reorder_batch done") 
-        print("input_batch.req_ids", input_batch.req_ids)
-        print("scheduler_output.num_scheduled_tokens", scheduler_output.num_scheduled_tokens)
-        print("input_batch.req_output_token_ids", input_batch.req_output_token_ids, "\n\n")
+        # print("TKE reorder_batch done")
+        # print("input_batch.req_ids", input_batch.req_ids)
+        # print(
+        #     "scheduler_output.num_scheduled_tokens",
+        #     scheduler_output.num_scheduled_tokens,
+        # )
+        # print(
+        #     "input_batch.req_output_token_ids", input_batch.req_output_token_ids, "\n\n"
+        # )
         return modified_batch
 
     def build(
@@ -311,14 +319,14 @@ class BokMetadataBuilder:
         assert self._num_decode_tokens + self._num_prefill_tokens == num_actual_tokens
 
         seq_lens_gpu = common_attn_metadata.seq_lens
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs] #TODO: IS THIS UPDATED???
+        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]  # TODO: IS THIS UPDATED???
         input_sequence_lengths_device = common_attn_metadata.query_start_loc.diff().to(
             dtype=torch.uint32
         )
         input_sequence_lengths_host = input_sequence_lengths_device.to(
             device=torch.device("cpu"),
         )
-        attn_metadata = BokMetadata(
+        attn_metadata = TkeMetadata(
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
             num_prefill_requests=self._num_prefill_requests,
@@ -337,7 +345,7 @@ class BokMetadataBuilder:
         return attn_metadata
 
 
-class BokImpl(AttentionImpl):
+class TkeImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -363,7 +371,7 @@ class BokImpl(AttentionImpl):
                 "Using irope in FlashInfer is not supported yet, it will fall"
                 " back to global attention for long context."
             )
-        self.scale = float(scale) #TODO why is this needed?
+        self.scale = float(scale)  # TODO why is this needed?
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -390,7 +398,7 @@ class BokImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: BokMetadata,
+        attn_metadata: TkeMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
@@ -448,6 +456,7 @@ class BokImpl(AttentionImpl):
 
         # TODO: copying fp8 attention outputs to the bf16 output tensor expected by vLLM, or figure out how to enable fp8 output, although it seems tied to input dtype at this point.
         output.copy_(attn_metadata.fp8_output_buffer[: output.shape[0], :, :])
+        print(output)
         return output
 
 

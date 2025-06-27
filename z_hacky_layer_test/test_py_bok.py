@@ -4,7 +4,7 @@ from typing import Generator
 import pytest
 import torch
 
-from py_bok import (
+from py_tke import (
     create_op,
     forward_inplace,
     calculate_workspace_size,
@@ -371,31 +371,55 @@ def test_forward_inplace(test_case: ForwardInplaceTestCase):
         qkv = qkv[0]
         print(f"DEBUG forward_inplace parameters (test file):")
         print(f"  op type: {type(op)}")
-        print(f"  qkv type: {type(qkv)}, shape: {qkv.shape}, dtype: {qkv.dtype}, device: {qkv.device}")
-        print(f"  num_context_requests type: {type(num_context_requests)}, value: {num_context_requests}")
-        
+        print(
+            f"  qkv type: {type(qkv)}, shape: {qkv.shape}, dtype: {qkv.dtype}, device: {qkv.device}"
+        )
+        print(
+            f"  num_context_requests type: {type(num_context_requests)}, value: {num_context_requests}"
+        )
+
         input_seq_lens_host_uint32 = input_sequence_lengths_host.to(torch.uint32)
         input_seq_lens_device_uint32 = input_sequence_lengths_device.to(torch.uint32)
         seq_lens_device_uint32 = sequence_lengths_device.to(torch.uint32)
         seq_lens_host_uint32 = sequence_lengths_host.to(torch.uint32)
         kv_cache_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
-        
-        print(f"  input_seq_lens_host_uint32 type: {type(input_seq_lens_host_uint32)}, shape: {input_seq_lens_host_uint32.shape}, dtype: {input_seq_lens_host_uint32.dtype}, device: {input_seq_lens_host_uint32.device}")
-        print(f"  input_seq_lens_device_uint32 type: {type(input_seq_lens_device_uint32)}, shape: {input_seq_lens_device_uint32.shape}, dtype: {input_seq_lens_device_uint32.dtype}, device: {input_seq_lens_device_uint32.device}")
-        print(f"  seq_lens_device_uint32 type: {type(seq_lens_device_uint32)}, shape: {seq_lens_device_uint32.shape}, dtype: {seq_lens_device_uint32.dtype}, device: {seq_lens_device_uint32.device}")
-        print(f"  seq_lens_host_uint32 type: {type(seq_lens_host_uint32)}, shape: {seq_lens_host_uint32.shape}, dtype: {seq_lens_host_uint32.dtype}, device: {seq_lens_host_uint32.device}")
-        print(f"  kv_cache_offsets_uint32 type: {type(kv_cache_offsets_uint32)}, shape: {kv_cache_offsets_uint32.shape}, dtype: {kv_cache_offsets_uint32.dtype}, device: {kv_cache_offsets_uint32.device}")
-        
+
+        print(
+            f"  input_seq_lens_host_uint32 type: {type(input_seq_lens_host_uint32)}, shape: {input_seq_lens_host_uint32.shape}, dtype: {input_seq_lens_host_uint32.dtype}, device: {input_seq_lens_host_uint32.device}"
+        )
+        print(
+            f"  input_seq_lens_device_uint32 type: {type(input_seq_lens_device_uint32)}, shape: {input_seq_lens_device_uint32.shape}, dtype: {input_seq_lens_device_uint32.dtype}, device: {input_seq_lens_device_uint32.device}"
+        )
+        print(
+            f"  seq_lens_device_uint32 type: {type(seq_lens_device_uint32)}, shape: {seq_lens_device_uint32.shape}, dtype: {seq_lens_device_uint32.dtype}, device: {seq_lens_device_uint32.device}"
+        )
+        print(
+            f"  seq_lens_host_uint32 type: {type(seq_lens_host_uint32)}, shape: {seq_lens_host_uint32.shape}, dtype: {seq_lens_host_uint32.dtype}, device: {seq_lens_host_uint32.device}"
+        )
+        print(
+            f"  kv_cache_offsets_uint32 type: {type(kv_cache_offsets_uint32)}, shape: {kv_cache_offsets_uint32.shape}, dtype: {kv_cache_offsets_uint32.dtype}, device: {kv_cache_offsets_uint32.device}"
+        )
+
         kv_cache_data_ptr = actual_kv_cache_pools[layer_index].data_ptr()
-        print(f"  kv_cache_data_ptr type: {type(kv_cache_data_ptr)}, value: {kv_cache_data_ptr}")
-        print(f"  output_scaling_factor type: {type(output_scaling_factor)}, shape: {output_scaling_factor.shape}, dtype: {output_scaling_factor.dtype}, device: {output_scaling_factor.device}")
-        print(f"  rotary_cos_sin type: {type(rotary_cos_sin)}, shape: {rotary_cos_sin.shape}, dtype: {rotary_cos_sin.dtype}, device: {rotary_cos_sin.device}")
-        print(f"  output type: {type(output)}, shape: {output.shape}, dtype: {output.dtype}, device: {output.device}")
-        print(f"  workspace type: {type(workspace)}, shape: {workspace.shape}, dtype: {workspace.dtype}, device: {workspace.device}")
-        
+        print(
+            f"  kv_cache_data_ptr type: {type(kv_cache_data_ptr)}, value: {kv_cache_data_ptr}"
+        )
+        print(
+            f"  output_scaling_factor type: {type(output_scaling_factor)}, shape: {output_scaling_factor.shape}, dtype: {output_scaling_factor.dtype}, device: {output_scaling_factor.device}"
+        )
+        print(
+            f"  rotary_cos_sin type: {type(rotary_cos_sin)}, shape: {rotary_cos_sin.shape}, dtype: {rotary_cos_sin.dtype}, device: {rotary_cos_sin.device}"
+        )
+        print(
+            f"  output type: {type(output)}, shape: {output.shape}, dtype: {output.dtype}, device: {output.device}"
+        )
+        print(
+            f"  workspace type: {type(workspace)}, shape: {workspace.shape}, dtype: {workspace.dtype}, device: {workspace.device}"
+        )
+
         cuda_stream = stream.cuda_stream
         print(f"  cuda_stream type: {type(cuda_stream)}, value: {cuda_stream}")
-        
+
         print(f"Test file parameters summary:")
         print(f"  Using concatenated QKV tensor: {qkv.shape}")
         print(f"  Layer index: {layer_index}")

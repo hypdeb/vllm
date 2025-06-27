@@ -10,7 +10,7 @@ from vllm import LLM, SamplingParams
 from vllm.attention.selector import global_force_attn_backend_context_manager, _Backend
 import torch
 
-from py_bok import (
+from py_tke import (
     create_op,
     forward_inplace,
     calculate_workspace_size,
@@ -27,7 +27,7 @@ from py_bok import (
 class SomeClass:
     def __init__(self):
         print("here 1", flush=True)
-        from z_hacky_layer_test.test_py_bok import (
+        from z_hacky_layer_test.test_py_tke import (
             ForwardInplaceTestCase,
             ContextRequest,
             GenerationRequest,
@@ -163,17 +163,17 @@ def main():
     # Load prompts from file if specified
     prompts = args.prompts or []
     prompt_configs = []  # List of (output_length, prompt) tuples
-    
+
     if args.prompts_file:
         with open(args.prompts_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 # Parse format: output_length, prompt
-                if ',' in line:
-                    parts = line.split(',', 1)  # Split only on first comma
+                if "," in line:
+                    parts = line.split(",", 1)  # Split only on first comma
                     try:
                         output_length = int(parts[0].strip())
                         prompt = parts[1].strip() if parts[1].strip() else ""
@@ -188,9 +188,9 @@ def main():
                     # No comma, treat as regular prompt with default output length
                     prompts.append(line)
                     prompt_configs.append((args.output_len, line))
-    
+
     # Handle command line prompts (use default output length)
-    for prompt in (args.prompts or []):
+    for prompt in args.prompts or []:
         if prompt not in prompts:  # Avoid duplicates
             prompts.append(prompt)
             prompt_configs.append((args.output_len, prompt))
@@ -228,17 +228,17 @@ def main():
         # Create list of prompts and corresponding sampling parameters
         batch_prompts = []
         batch_sampling_params = []
-        
+
         for output_length, prompt in prompt_configs:
             batch_prompts.append(prompt)
             batch_sampling_params.append(
                 SamplingParams(
-                    temperature=.0,
+                    temperature=0.0,
                     top_p=1.0,
                     max_tokens=output_length,
                 )
             )
-        
+
         # Process all prompts in one batch with individual sampling parameters
         outputs = llm.generate(batch_prompts, batch_sampling_params)
         return outputs
@@ -269,7 +269,7 @@ def main():
     print(f"Average latency: {avg_latency:.4f} seconds")
     print(f"Latency per prompt: {avg_latency / len(prompts):.4f} seconds")
     print("\nPrompt-Output Pairs:")
-    
+
     # Display results in original order
     for i, (output_length, prompt) in enumerate(prompt_configs):
         if i < len(results):
@@ -277,7 +277,7 @@ def main():
             print(f"Output Length:{output_length}")
             print(f"Prompt:{prompt}")
             print(f"Output:{results[i].outputs[0].text}")
-    
+
     for percentage, percentile in zip(percentages, percentiles):
         print(f"{percentage}% percentile latency: {percentile:.4f} seconds")
 
