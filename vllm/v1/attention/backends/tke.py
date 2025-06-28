@@ -165,13 +165,20 @@ class TkeMetadataBuilder:
         max_attention_window_size = runner.vllm_config.model_config.max_model_len
         cyclic_attention_window_size = runner.vllm_config.model_config.max_model_len
 
-        # TODO: check if max_num_seqs == max_batch_size
         self.multi_block_semaphores = torch.zeros(
             runner.num_query_heads * runner.scheduler_config.max_num_seqs,
             device=torch.device("cuda"),
             dtype=torch.int32,
             requires_grad=False,
         ).contiguous()
+
+        self.output_scaling_factor = torch.tensor(
+            [1.0], dtype=torch.float32, device=torch.device("cuda"), requires_grad=False
+        )
+
+        self.kv_cache_dequantization_factor = torch.tensor(
+            [1.0], dtype=torch.float32, device=torch.device("cuda"), requires_grad=False
+        )
 
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
@@ -183,10 +190,12 @@ class TkeMetadataBuilder:
             qScaling=1.0,
             maxAttentionWindowSize=max_attention_window_size,
             cyclicAttentionWindowSize=cyclic_attention_window_size,
-            outputScalingFactor=1.0,
+            outputScalingFactor=self.output_scaling_factor,
+            kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
             multiBlockSemaphores=self.multi_block_semaphores,
             enableSpeculativeDecoding=False,
         )
+
         # TODO: check if max_num_seqs == max_batch_size
         workspace_size = calculate_workspace_size(
             self.op,
@@ -233,13 +242,6 @@ class TkeMetadataBuilder:
     def reorder_batch(
         self, input_batch: InputBatch, scheduler_output: SchedulerOutput
     ) -> bool:
-        # print("TKE reorder_batch")
-        # print("input_batch.req_ids", input_batch.req_ids)
-        # print(
-        #     "scheduler_output.num_scheduled_tokens",
-        #     scheduler_output.num_scheduled_tokens,
-        # )
-        # print("input_batch.req_output_token_ids", input_batch.req_output_token_ids)
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
@@ -287,7 +289,6 @@ class TkeMetadataBuilder:
             decode_idx = decode_indexes[i - 1]
             if prefill_idx < num_prefills:
                 break
-            # print("Swapping prefill_idx", prefill_idx, "with decode_idx", decode_idx)
             input_batch.swap_states(prefill_idx, decode_idx)
             modified_batch = True
 
@@ -296,15 +297,6 @@ class TkeMetadataBuilder:
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
 
-        # print("TKE reorder_batch done")
-        # print("input_batch.req_ids", input_batch.req_ids)
-        # print(
-        #     "scheduler_output.num_scheduled_tokens",
-        #     scheduler_output.num_scheduled_tokens,
-        # )
-        # print(
-        #     "input_batch.req_output_token_ids", input_batch.req_output_token_ids, "\n\n"
-        # )
         return modified_batch
 
     def build(
@@ -427,17 +419,9 @@ class TkeImpl(AttentionImpl):
         kv_cache_data_ptr = kv_cache.data_ptr()
         cuda_stream = torch.cuda.current_stream().cuda_stream
 
-        qkv = torch.cat(
-            [
-                query.reshape(query.shape[0], -1),
-                key.reshape(key.shape[0], -1),
-                value.reshape(value.shape[0], -1),
-            ],
-            dim=1,
-        ).contiguous()
         forward_inplace(
             op=attn_metadata.op,
-            qkv=qkv,
+            qkv=query,
             numContextRequests=attn_metadata.num_prefill_requests,
             contextChunkSize=attn_metadata.context_chunk_size,
             # TODO: see how to get actual input seqlens
@@ -456,7 +440,6 @@ class TkeImpl(AttentionImpl):
 
         # TODO: copying fp8 attention outputs to the bf16 output tensor expected by vLLM, or figure out how to enable fp8 output, although it seems tied to input dtype at this point.
         output.copy_(attn_metadata.fp8_output_buffer[: output.shape[0], :, :])
-        print(output)
         return output
 
 
