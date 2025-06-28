@@ -1,3 +1,13 @@
-3, Hello, my name is
-3, Complete this sentence: The quick brown
-8, I am
+30, Hello, my name is
+13, Complete this sentence: The quick brown
+18, I am
+25, What is the capital of France
+42, Explain the theory of relativity in simple terms
+33, Write a haiku about springtime
+21, List three healthy breakfast foods
+38, Tell me an interesting fact about elephants
+15, How do you make pizza dough
+29, What causes the northern lights
+44, Describe the process of photosynthesis briefly
+17, Who wrote Romeo and Juliet
+31, What is the deepest point in the ocean

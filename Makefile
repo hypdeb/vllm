@@ -73,6 +73,12 @@ vllm-sample-flashattn:
 vllm-sample:
 	VLLM_ATTENTION_BACKEND=TKE python vllm_sample.py --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file z_hacky_layer_test/sample_prompts.txt 
 
+vllm-sample-70b:
+	VLLM_ATTENTION_BACKEND=TKE python vllm_sample.py --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-70B-Instruct-FP8 --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file z_hacky_layer_test/sample_prompts.txt 
+
+vllm-sample-70b-tp4:
+	VLLM_ATTENTION_BACKEND=TKE python vllm_sample.py --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-70B-Instruct-FP8 --enforce-eager --batch-size 3 --output-len 10 --num-iters 1 --num-iters-warmup 0 --prompts-file z_hacky_layer_test/sample_prompts.txt --tp 4
+
 build-model8b-edgar4:
 	python benchmarks/cpp/prepare_dataset.py --stdout --tokenizer=meta-llama/Llama-3.1-8B token-norm-dist --num-requests=30 --input-mean=2048 --output-mean=128 --input-stdev=0 --output-stdev=0  > ./tmp/synthetic_2048_128.txt
 	trtllm-bench --workspace=./tmp --model meta-llama/Llama-3.1-8B build  --dataset ./tmp/synthetic_2048_128.txt

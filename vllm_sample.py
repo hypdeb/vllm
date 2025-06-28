@@ -154,6 +154,9 @@ def parse_args():
     parser.add_argument(
         "--output-json", type=str, help="Path to save the results in JSON format"
     )
+    parser.add_argument(
+        "--tp", type=int, default=1, help="Number of TP"
+    )
     return parser.parse_args()
 
 
@@ -217,10 +220,11 @@ def main():
         model=args.model,
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
-        gpu_memory_utilization=0.3,
+        gpu_memory_utilization=0.85,
         quantization=quantization,
         kv_cache_dtype=kv_cache_dtype,
         block_size=32,
+        tensor_parallel_size=args.tp,
     )
 
     # Process prompts as a batch with individual sampling parameters
