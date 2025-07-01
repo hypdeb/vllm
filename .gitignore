@@ -212,3 +212,6 @@ tmp/
 
 
 *_attn_captures/*
+
+# Profiler / sanitizer outputs
+*.nsys-rep

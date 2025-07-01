@@ -1,4 +1,6 @@
-45, Hello, my name is
 43, Hello, my name is
-78, Complete this sentence: The quick brown
+500, Complete this sentence: The quick brown cat
 12, this is my last message
+65, The keyboard I'm using has had its key caps replaced partially. However
+99, These violent delights have violent ends
+500, With infinite complacency, men went to and fro about the globe, confident of our empire over this world. Yet across the gulf of space, intellects vast and cool and unsympathetic

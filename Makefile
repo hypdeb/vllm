@@ -93,7 +93,37 @@ run-base-vllm:
 
 trt-llm-setup:
 	python scripts/build_wheel.py --use_ccache -p -a native
- 
+
+benchmark-latency: TKE_BACKEND := TKE
+benchmark-latency: FLASH_BACKEND := FLASH_ATTN
+benchmark-latency: MODEL_PATH := /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-70B-Instruct-FP8
+benchmark-latency: TP_SIZE := 4
+benchmark-latency: INPUT_LEN := 60000
+benchmark-latency: MAX_MODEL_LEN := 131072
+benchmark-latency: NUM_ITERS_WARMUP := 5
+benchmark-latency: BATCH_SIZE := 4
+benchmark-latency: NUM_ITERS := 100
+benchmark-latency:
+	LLM_ATTENTION_BACKEND=$(TKE_BACKEND) python benchmarks/benchmark_latency.py \
+		--model $(MODEL_PATH) \
+		--tensor-parallel-size $(TP_SIZE) \
+		--quantization modelopt \
+		--input-len $(INPUT_LEN) \
+		--max-model-len $(MAX_MODEL_LEN) \
+		--num-iters-warmup $(NUM_ITERS_WARMUP) \
+		--batch-size $(BATCH_SIZE) \
+		--num-iters $(NUM_ITERS)
+	LLM_ATTENTION_BACKEND=$(FLASH_BACKEND) python benchmarks/benchmark_latency.py \
+		--model $(MODEL_PATH) \
+		--tensor-parallel-size $(TP_SIZE) \
+		--quantization modelopt \
+		--input-len $(INPUT_LEN) \
+		--max-model-len $(MAX_MODEL_LEN) \
+		--num-iters-warmup $(NUM_ITERS_WARMUP) \
+		--batch-size $(BATCH_SIZE) \
+		--num-iters $(NUM_ITERS)
+
+
 make send-requests:
 	bash -c '
 	curl -s -X POST http://localhost:8000/v1/chat/completions \
@@ -112,4 +142,4 @@ make send-requests:
 	echo "Request 1:"; cat req1.json; echo
 	echo "Request 2:"; cat req2.json; echo
 	echo "Request 3:"; cat req3.json
-	'
+	';

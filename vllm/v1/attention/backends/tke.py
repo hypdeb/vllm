@@ -79,7 +79,6 @@ class TkeAttentionBackend(AttentionBackend):
 class TkeMetadata:
     op: AttentionOp
     attention_layer_dimensions: AttentionLayerDimensions
-    num_prefill_requests: int
     seq_lens_gpu: torch.Tensor
     seq_lens_cpu: torch.Tensor
     input_sequence_lengths_host: torch.Tensor
@@ -88,6 +87,10 @@ class TkeMetadata:
     rotary_cos_sin: torch.Tensor
     block_table: BlockTable
     num_reqs: int
+    num_context_requests: int
+    num_decode_requests: int
+    num_context_tokens: int
+    num_decode_tokens: int
     context_chunk_size: int
     fp8_output_buffer: torch.Tensor
 
@@ -165,6 +168,7 @@ class TkeMetadataBuilder:
         max_attention_window_size = runner.vllm_config.model_config.max_model_len
         cyclic_attention_window_size = runner.vllm_config.model_config.max_model_len
 
+        # An internal buffer used by the XQA kernel. Needs to be initialized to 0.
         self.multi_block_semaphores = torch.zeros(
             runner.num_query_heads * runner.scheduler_config.max_num_seqs,
             device=torch.device("cuda"),
@@ -196,13 +200,14 @@ class TkeMetadataBuilder:
             enableSpeculativeDecoding=False,
         )
 
-        # TODO: check if max_num_seqs == max_batch_size
+        # The size in bytes of the workspace needed by FMHA and XQA.
         workspace_size = calculate_workspace_size(
             self.op,
             self.runner.max_num_tokens,
             self.runner.scheduler_config.max_num_seqs,
         )
 
+        # Allocate the workspace.
         self.workspace = torch.zeros(
             workspace_size,
             device=torch.device("cuda"),
@@ -227,6 +232,7 @@ class TkeMetadataBuilder:
             requires_grad=False,
         ).contiguous()
 
+        # The kernel produces FP8 outputs, but the backend is expected to return BF16 data.
         self.fp8_output_buffer = torch.zeros(
             self.runner.max_num_tokens,
             self.runner.num_query_heads,
@@ -236,17 +242,33 @@ class TkeMetadataBuilder:
             requires_grad=False,
         ).contiguous()
 
+        # Buffer to store the sequence lengths on the host. Required by the ops.
+        self.sequence_lengths_host = torch.zeros(
+            runner.scheduler_config.max_num_seqs,
+            device=torch.device("cpu"),
+            dtype=torch.int32,
+            requires_grad=False,
+        ).contiguous()
+
+        # Buffer to store the input sequence lengths on the host. Required by the ops.
+        self.input_sequence_lengths_host = torch.zeros(
+            runner.scheduler_config.max_num_seqs,
+            device=torch.device("cpu"),
+            dtype=torch.int32,
+            requires_grad=False,
+        ).contiguous()
+
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False  # TODO: implement this
 
+    # TODO: this could use a unit test. A lot depends on this being correct.
     def reorder_batch(
         self, input_batch: InputBatch, scheduler_output: SchedulerOutput
     ) -> bool:
-        # We now want to reorder the batch so that the "decode" requests are and
-        # the front and the "prefill" requests are at the using the least amount
-        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
-        # where attention is likely memory-bound and "prefill" to mean requests
-        # where attention is likely compute-bound
+        """
+        Reorders the sequences in the batch so that the "decode" sequences are at the back of the batch.
+        We identify "decode" sequences as those with a single scheduled token, but it shouldn't matter: we can in theory also use our generation kernels for 1-token long context requests.
+        """
 
         decode_indexes: List[int] = []
         prefill_indexes: List[int] = []
@@ -255,9 +277,6 @@ class TkeMetadataBuilder:
 
         for index_in_batch, request_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            # for now treat 1 scheduled token as "decode" even if its not,
-            # we should update this to something like < 8 in the future but
-            # currently the decode run only supports num_tokens = 1
             if num_tokens == 1:
                 decode_indexes.append(index_in_batch)
                 num_decode_tokens += num_tokens
@@ -265,31 +284,27 @@ class TkeMetadataBuilder:
                 prefill_indexes.append(index_in_batch)
                 num_prefill_tokens += num_tokens
 
-        # We hope that this is fairly minimal since decodes
-        # should be around for a number of iterations so hopefully they are
-        # relatively stationary (and new request are generally appended to the
-        # persistent batch so already should be at the back)
-        # To achieve this we loop over the decodes in descending order and
-        # the prefills in ascending order. We swap decodes from the  "back"
-        # i.e. past where the last decode should be in the reodorered with
-        # prefills from the front of the batch.
-        # `decodes` and `prefills` are already in ascending order just based on
-        # the above loop
+            # Also populate the host input sequence lengths.
+            self.input_sequence_lengths_host[index_in_batch] = num_tokens
+
         num_decodes = len(decode_indexes)
         num_prefills = len(prefill_indexes)
         modified_batch = False
 
-        # TODO: doing the wrong thing currently. Fix when moving to multiple sequences cases.
         for i in range(1, min(num_decodes, num_prefills) + 1):
-            # If the decode is at the "back" of the batch, i, we can swap it
-            # with the prefill closest to the front of the batch
-            # decode_idx = decodes[num_decodes - i]
             prefill_idx = prefill_indexes[num_prefills - i]
-            # prefill_idx = prefills[i - 1]
             decode_idx = decode_indexes[i - 1]
             if prefill_idx < num_prefills:
                 break
             input_batch.swap_states(prefill_idx, decode_idx)
+
+            # Also swap the input sequence lengths populated above.
+            temp_input_sequence_length = self.input_sequence_lengths_host[prefill_idx]
+            self.input_sequence_lengths_host[prefill_idx] = (
+                self.input_sequence_lengths_host[decode_idx]
+            )
+            self.input_sequence_lengths_host[decode_idx] = temp_input_sequence_length
+
             modified_batch = True
 
         self._num_decode_requests = num_decodes
@@ -307,29 +322,24 @@ class TkeMetadataBuilder:
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
     ):
-        assert self._num_decode_requests + self._num_prefill_requests == num_reqs
-        assert self._num_decode_tokens + self._num_prefill_tokens == num_actual_tokens
-
-        seq_lens_gpu = common_attn_metadata.seq_lens
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]  # TODO: IS THIS UPDATED???
         input_sequence_lengths_device = common_attn_metadata.query_start_loc.diff().to(
             dtype=torch.uint32
-        )
-        input_sequence_lengths_host = input_sequence_lengths_device.to(
-            device=torch.device("cpu"),
         )
         attn_metadata = TkeMetadata(
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
-            num_prefill_requests=self._num_prefill_requests,
-            seq_lens_gpu=seq_lens_gpu,
-            seq_lens_cpu=seq_lens_cpu,
-            input_sequence_lengths_host=input_sequence_lengths_host,
+            seq_lens_gpu=common_attn_metadata.seq_lens,
+            seq_lens_cpu=self.runner.seq_lens_cpu,
+            input_sequence_lengths_host=self.input_sequence_lengths_host,
             input_sequence_lengths_device=input_sequence_lengths_device,
             workspace=self.workspace,
             rotary_cos_sin=self.rotary_cos_sin,
             block_table=self.block_table,
             num_reqs=num_reqs,
+            num_context_requests=self._num_prefill_requests,
+            num_decode_requests=self._num_decode_requests,
+            num_decode_tokens=self._num_decode_tokens,
+            num_context_tokens=self._num_prefill_tokens,
             context_chunk_size=self.context_chunk_size,
             fp8_output_buffer=self.fp8_output_buffer,
         )
@@ -363,10 +373,8 @@ class TkeImpl(AttentionImpl):
                 "Using irope in FlashInfer is not supported yet, it will fall"
                 " back to global attention for long context."
             )
-        self.scale = float(scale)  # TODO why is this needed?
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.alibi_slopes = alibi_slopes
+        self.scale = float(scale)
+        self.alibi_slopes = None
         if sliding_window is None:
             self.sliding_window = (-1, -1)
         else:
@@ -413,25 +421,23 @@ class TkeImpl(AttentionImpl):
         kv_cache_block_offsets = attn_metadata.block_table.block_table[
             : attn_metadata.num_reqs, :
         ]
-        seq_lens_cpu_uint32 = attn_metadata.seq_lens_cpu.to(torch.uint32)
-        seq_lens_gpu_uint32 = attn_metadata.seq_lens_gpu.to(torch.uint32)
-        kv_cache_block_offsets_uint32 = kv_cache_block_offsets.to(torch.uint32)
-        kv_cache_data_ptr = kv_cache.data_ptr()
         cuda_stream = torch.cuda.current_stream().cuda_stream
 
         forward_inplace(
             op=attn_metadata.op,
             qkv=query,
-            numContextRequests=attn_metadata.num_prefill_requests,
+            numContextRequests=attn_metadata.num_context_requests,
             contextChunkSize=attn_metadata.context_chunk_size,
             # TODO: see how to get actual input seqlens
             # TODO: see how to skip / workaround the uint cast
-            inputSequenceLengthsHost=attn_metadata.input_sequence_lengths_host,
+            inputSequenceLengthsHost=attn_metadata.input_sequence_lengths_host[
+                : attn_metadata.num_reqs
+            ],
             inputSequenceLengthsDevice=attn_metadata.input_sequence_lengths_device,
-            sequenceLengthsDevice=seq_lens_gpu_uint32,
-            sequenceLengthsHost=seq_lens_cpu_uint32,
-            kvCacheBlockOffsets=kv_cache_block_offsets_uint32,
-            kvCachePoolPtr=kv_cache_data_ptr,
+            sequenceLengthsDevice=attn_metadata.seq_lens_gpu,
+            sequenceLengthsHost=attn_metadata.seq_lens_cpu,
+            kvCacheBlockOffsets=kv_cache_block_offsets,
+            kvCachePoolPtr=kv_cache.data_ptr(),
             rotaryCosSin=attn_metadata.rotary_cos_sin,
             output=attn_metadata.fp8_output_buffer.view(torch.int8),
             workspace=attn_metadata.workspace,
