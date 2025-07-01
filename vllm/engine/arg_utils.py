@@ -334,8 +334,9 @@ class EngineArgs:
     eplb_window_size: int = ParallelConfig.eplb_window_size
     eplb_step_interval: int = ParallelConfig.eplb_step_interval
     eplb_log_balancedness: bool = ParallelConfig.eplb_log_balancedness
-    max_parallel_loading_workers: Optional[
-        int] = ParallelConfig.max_parallel_loading_workers
+    max_parallel_loading_workers: Optional[int] = (
+        ParallelConfig.max_parallel_loading_workers
+    )
     block_size: Optional[BlockSize] = CacheConfig.block_size
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
@@ -556,31 +557,41 @@ class EngineArgs:
         )
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
-        model_group.add_argument("--hf-token",
-                                 type=str,
-                                 nargs="?",
-                                 const=True,
-                                 default=model_kwargs["hf_token"]["default"],
-                                 help=model_kwargs["hf_token"]["help"])
-        model_group.add_argument("--hf-overrides",
-                                 **model_kwargs["hf_overrides"])
-        model_group.add_argument("--override-neuron-config",
-                                 **model_kwargs["override_neuron_config"])
-        model_group.add_argument("--override-pooler-config",
-                                 **model_kwargs["override_pooler_config"])
-        model_group.add_argument("--logits-processor-pattern",
-                                 **model_kwargs["logits_processor_pattern"])
-        model_group.add_argument("--generation-config",
-                                 **model_kwargs["generation_config"])
-        model_group.add_argument("--override-generation-config",
-                                 **model_kwargs["override_generation_config"])
-        model_group.add_argument("--enable-sleep-mode",
-                                 **model_kwargs["enable_sleep_mode"])
-        model_group.add_argument("--model-impl",
-                                 choices=[f.value for f in ModelImpl],
-                                 **model_kwargs["model_impl"])
-        model_group.add_argument("--override-attention-dtype",
-                                 **model_kwargs["override_attention_dtype"])
+        model_group.add_argument(
+            "--hf-token",
+            type=str,
+            nargs="?",
+            const=True,
+            default=model_kwargs["hf_token"]["default"],
+            help=model_kwargs["hf_token"]["help"],
+        )
+        model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
+        model_group.add_argument(
+            "--override-neuron-config", **model_kwargs["override_neuron_config"]
+        )
+        model_group.add_argument(
+            "--override-pooler-config", **model_kwargs["override_pooler_config"]
+        )
+        model_group.add_argument(
+            "--logits-processor-pattern", **model_kwargs["logits_processor_pattern"]
+        )
+        model_group.add_argument(
+            "--generation-config", **model_kwargs["generation_config"]
+        )
+        model_group.add_argument(
+            "--override-generation-config", **model_kwargs["override_generation_config"]
+        )
+        model_group.add_argument(
+            "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
+        )
+        model_group.add_argument(
+            "--model-impl",
+            choices=[f.value for f in ModelImpl],
+            **model_kwargs["model_impl"],
+        )
+        model_group.add_argument(
+            "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
+        )
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -665,18 +676,53 @@ class EngineArgs:
             **parallel_kwargs["pipeline_parallel_size"],
         )
         parallel_group.add_argument(
-            "--enable-expert-parallel",
-            **parallel_kwargs["enable_expert_parallel"])
-        parallel_group.add_argument("--enable-eplb",
-                                    **parallel_kwargs["enable_eplb"])
-        parallel_group.add_argument("--num-redundant-experts",
-                                    **parallel_kwargs["num_redundant_experts"])
-        parallel_group.add_argument("--eplb-window-size",
-                                    **parallel_kwargs["eplb_window_size"])
-        parallel_group.add_argument("--eplb-step-interval",
-                                    **parallel_kwargs["eplb_step_interval"])
-        parallel_group.add_argument("--eplb-log-balancedness",
-                                    **parallel_kwargs["eplb_log_balancedness"])
+            "--tensor-parallel-size",
+            "-tp",
+            **parallel_kwargs["tensor_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-size",
+            "-dp",
+            **parallel_kwargs["data_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-size-local",
+            type=int,
+            default=None,
+            help="Local data parallel size per node. If not set, defaults to data_parallel_size.",
+        )
+        parallel_group.add_argument(
+            "--data-parallel-address",
+            type=str,
+            default=None,
+            help="IP address for data parallel communication.",
+        )
+        parallel_group.add_argument(
+            "--data-parallel-rpc-port",
+            type=int,
+            default=None,
+            help="Port for data parallel RPC communication.",
+        )
+        parallel_group.add_argument(
+            "--data-parallel-backend",
+            **parallel_kwargs["data_parallel_backend"],
+        )
+        parallel_group.add_argument(
+            "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
+        )
+        parallel_group.add_argument("--enable-eplb", **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument(
+            "--num-redundant-experts", **parallel_kwargs["num_redundant_experts"]
+        )
+        parallel_group.add_argument(
+            "--eplb-window-size", **parallel_kwargs["eplb_window_size"]
+        )
+        parallel_group.add_argument(
+            "--eplb-step-interval", **parallel_kwargs["eplb_step_interval"]
+        )
+        parallel_group.add_argument(
+            "--eplb-log-balancedness", **parallel_kwargs["eplb_log_balancedness"]
+        )
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"],
@@ -1081,8 +1127,7 @@ class EngineArgs:
 
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(
-            device=cast(Device, current_platform.device_type))
+        device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1395,11 +1440,15 @@ class EngineArgs:
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
         from vllm.platforms import current_platform
-        if (current_platform.is_cuda()
-                and current_platform.get_device_capability()
-                and current_platform.get_device_capability().major < 8):
-            _raise_or_fallback(feature_name="Compute Capability < 8.0",
-                               recommend_to_remove=False)
+
+        if (
+            current_platform.is_cuda()
+            and current_platform.get_device_capability()
+            and current_platform.get_device_capability().major < 8
+        ):
+            _raise_or_fallback(
+                feature_name="Compute Capability < 8.0", recommend_to_remove=False
+            )
             return False
 
         # No Fp8 KV cache so far.
@@ -1454,8 +1503,7 @@ class EngineArgs:
             return False
 
         # V1 mamba models are unoptimized.
-        if model_config.has_inner_state and _warn_or_fallback(
-                feature_name="Mamba"):
+        if model_config.has_inner_state and _warn_or_fallback(feature_name="Mamba"):
             return False
 
         # No Concurrent Partial Prefills so far.
@@ -1561,14 +1609,14 @@ class EngineArgs:
 
         # The platform may be supported on V1, but off by default for now.
         if not current_platform.default_v1(  # noqa: SIM103
-                model_config=model_config) and _warn_or_fallback(
-                    current_platform.device_name):
+            model_config=model_config
+        ) and _warn_or_fallback(current_platform.device_name):
             return False
 
-        if (current_platform.is_cpu()
-                and model_config.get_sliding_window() is not None):
-            _raise_or_fallback(feature_name="sliding window (CPU backend)",
-                               recommend_to_remove=False)
+        if current_platform.is_cpu() and model_config.get_sliding_window() is not None:
+            _raise_or_fallback(
+                feature_name="sliding window (CPU backend)", recommend_to_remove=False
+            )
             return False
 
         #############################################################
@@ -1647,8 +1695,9 @@ class EngineArgs:
         if self.max_num_seqs is None:
             self.max_num_seqs = 256
 
-    def _set_default_args_v1(self, usage_context: UsageContext,
-                             model_config: ModelConfig) -> None:
+    def _set_default_args_v1(
+        self, usage_context: UsageContext, model_config: ModelConfig
+    ) -> None:
         """Set Default Arguments for V1 Engine."""
 
         # V1 always uses chunked prefills and prefix caching
@@ -1664,11 +1713,11 @@ class EngineArgs:
 
             # TODO: when encoder models are supported we'll have to
             # check for causal attention here.
-            incremental_prefill_supported = (pooling_type is not None and
-                                             pooling_type.lower() == "last")
+            incremental_prefill_supported = (
+                pooling_type is not None and pooling_type.lower() == "last"
+            )
 
-            action = "Enabling" if \
-                incremental_prefill_supported else "Disabling"
+            action = "Enabling" if incremental_prefill_supported else "Disabling"
 
             if self.enable_chunked_prefill is None:
                 self.enable_chunked_prefill = incremental_prefill_supported
@@ -1778,8 +1827,7 @@ class EngineArgs:
                 use_context_value,
             )
 
-        if (self.max_num_seqs is None
-                and usage_context in default_max_num_seqs):
+        if self.max_num_seqs is None and usage_context in default_max_num_seqs:
             self.max_num_seqs = default_max_num_seqs[usage_context]
 
             logger.debug(

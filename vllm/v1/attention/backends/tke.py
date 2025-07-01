@@ -116,24 +116,26 @@ class TkeMetadataBuilder:
         self.attention_layer_dimensions.numKVHeads = kv_cache_spec.num_kv_heads
         self.attention_layer_dimensions.headSize = kv_cache_spec.head_size
 
-        # TODO: find exact values.
         rotary_positional_embedding = RotaryEmbedding()
 
         rope_scaling = getattr(
             runner.vllm_config.model_config.hf_config, "rope_scaling", None
         )
-        scaling_factor = rope_scaling.get("factor", 1.0) if rope_scaling else 1.0
-        rotary_positional_embedding.rotaryEmbeddingScale = scaling_factor
-        mapping_dict = {
-            "none": RotaryScalingType.NONE,
-            "linear": RotaryScalingType.LINEAR,
-            "dynamic": RotaryScalingType.DYNAMIC,
-            "longrope": RotaryScalingType.LONG,
-            "llama3": RotaryScalingType.LLAMA3,
-        }
-        rotary_positional_embedding.rotaryScalingType = (
-            RotaryScalingType.LLAMA3
-        )  # TODO: fix.
+        if rope_scaling is not None:
+            scaling_factor = rope_scaling.get("factor", 1.0) if rope_scaling else 1.0
+            rotary_positional_embedding.rotaryEmbeddingScale = scaling_factor
+            mapping_dict = {
+                "none": RotaryScalingType.NONE,
+                "linear": RotaryScalingType.LINEAR,
+                "dynamic": RotaryScalingType.DYNAMIC,
+                "longrope": RotaryScalingType.LONG,
+                "llama3": RotaryScalingType.LLAMA3,
+            }
+            rotary_positional_embedding.rotaryScalingType = mapping_dict[
+                rope_scaling.get("rope_type", "none")
+            ]
+        else:
+            rotary_positional_embedding.rotaryEmbeddingScale = 1.0
 
         max_position_embeddings = getattr(
             runner.vllm_config.model_config.hf_config, "max_position_embeddings", 8192
@@ -150,9 +152,7 @@ class TkeMetadataBuilder:
         rotary_positional_embedding.rotaryEmbeddingDim = (
             runner.vllm_config.model_config.get_head_size()
         )
-        rotary_positional_embedding.type = (
-            RotaryPositionalEmbeddingType.GPT_NEOX
-        )  # TODO: what to do with this?
+        rotary_positional_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
 
         prefix_cache_configuration = PrefixCacheConfiguration()
         prefix_cache_configuration.dataType = (
@@ -198,6 +198,7 @@ class TkeMetadataBuilder:
             kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
             multiBlockSemaphores=self.multi_block_semaphores,
             enableSpeculativeDecoding=False,
+            enablePDL=True,
         )
 
         # The size in bytes of the workspace needed by FMHA and XQA.
@@ -231,6 +232,7 @@ class TkeMetadataBuilder:
             device="cuda",
             requires_grad=False,
         ).contiguous()
+        print(f"rotary cos sin: {self.rotary_cos_sin}")
 
         # The kernel produces FP8 outputs, but the backend is expected to return BF16 data.
         self.fp8_output_buffer = torch.zeros(
@@ -284,9 +286,6 @@ class TkeMetadataBuilder:
                 prefill_indexes.append(index_in_batch)
                 num_prefill_tokens += num_tokens
 
-            # Also populate the host input sequence lengths.
-            self.input_sequence_lengths_host[index_in_batch] = num_tokens
-
         num_decodes = len(decode_indexes)
         num_prefills = len(prefill_indexes)
         modified_batch = False
@@ -298,13 +297,6 @@ class TkeMetadataBuilder:
                 break
             input_batch.swap_states(prefill_idx, decode_idx)
 
-            # Also swap the input sequence lengths populated above.
-            temp_input_sequence_length = self.input_sequence_lengths_host[prefill_idx]
-            self.input_sequence_lengths_host[prefill_idx] = (
-                self.input_sequence_lengths_host[decode_idx]
-            )
-            self.input_sequence_lengths_host[decode_idx] = temp_input_sequence_length
-
             modified_batch = True
 
         self._num_decode_requests = num_decodes
@@ -314,28 +306,34 @@ class TkeMetadataBuilder:
 
         return modified_batch
 
+    def can_run_in_cudagraph(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> bool:
+        return True
+
     def build(
         self,
-        num_reqs: int,
-        num_actual_tokens: int,
-        max_query_len: int,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
     ):
+        num_sequences = self._num_decode_requests + self._num_prefill_requests
         input_sequence_lengths_device = common_attn_metadata.query_start_loc.diff().to(
             dtype=torch.uint32
+        )
+        input_sequence_lengths_host = input_sequence_lengths_device.to(
+            device=torch.device("cpu")
         )
         attn_metadata = TkeMetadata(
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
-            seq_lens_gpu=common_attn_metadata.seq_lens,
-            seq_lens_cpu=self.runner.seq_lens_cpu,
-            input_sequence_lengths_host=self.input_sequence_lengths_host,
-            input_sequence_lengths_device=input_sequence_lengths_device,
+            seq_lens_gpu=common_attn_metadata.seq_lens[:num_sequences],
+            seq_lens_cpu=self.runner.seq_lens_cpu[:num_sequences],
+            input_sequence_lengths_host=input_sequence_lengths_host[:num_sequences],
+            input_sequence_lengths_device=input_sequence_lengths_device[:num_sequences],
             workspace=self.workspace,
             rotary_cos_sin=self.rotary_cos_sin,
             block_table=self.block_table,
-            num_reqs=num_reqs,
+            num_reqs=num_sequences,
             num_context_requests=self._num_prefill_requests,
             num_decode_requests=self._num_decode_requests,
             num_decode_tokens=self._num_decode_tokens,
@@ -400,6 +398,9 @@ class TkeImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: TkeMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[
+            torch.Tensor
+        ] = None,  # TODO: per batch outpust scaling? Does that make sense?
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -428,8 +429,6 @@ class TkeImpl(AttentionImpl):
             qkv=query,
             numContextRequests=attn_metadata.num_context_requests,
             contextChunkSize=attn_metadata.context_chunk_size,
-            # TODO: see how to get actual input seqlens
-            # TODO: see how to skip / workaround the uint cast
             inputSequenceLengthsHost=attn_metadata.input_sequence_lengths_host[
                 : attn_metadata.num_reqs
             ],
@@ -444,7 +443,6 @@ class TkeImpl(AttentionImpl):
             stream=cuda_stream,
         )
 
-        # TODO: copying fp8 attention outputs to the bf16 output tensor expected by vLLM, or figure out how to enable fp8 output, although it seems tied to input dtype at this point.
         output.copy_(attn_metadata.fp8_output_buffer[: output.shape[0], :, :])
         return output
 
@@ -483,7 +481,7 @@ def create_sinusoidal_positions_for_attention_plugin(
     scale: float = 1.0,
     scale_type: RotaryScalingType = RotaryScalingType.NONE,
     # Other scaling configs that only used by certain scaling types.
-    rope_scaling_config: dict = None,
+    rope_scaling_config: Optional[dict] = None,
     dtype=np.float32,
 ) -> List[np.ndarray]:
     if scale_type == RotaryScalingType.LINEAR:
