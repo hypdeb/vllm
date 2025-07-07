@@ -31,7 +31,9 @@ class CommonAttentionMetadata:
     """
 
     query_start_loc: torch.Tensor
-    """(batch_size + 1,), the start location of each request in query Tensor"""
+    """(batch_size + 1,), the start location of each request in query Tensor
+        Since it also contains the last "start" of the "next" request, which doesn't exist, it is rather the cumulative input sequence lengths and the name is a bit misleading.
+    """
     seq_lens: torch.Tensor
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
