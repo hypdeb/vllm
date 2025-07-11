@@ -10,6 +10,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
+                                              InputLayout,
                                               is_quantized_kv_cache)
 from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
@@ -98,6 +99,18 @@ class FlashAttentionBackend(AttentionBackend):
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
+
+    @staticmethod
+    def get_output_dtype() -> torch.dtype:
+        return torch.float8_e4m3fn
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 
 @dataclass

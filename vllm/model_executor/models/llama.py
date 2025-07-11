@@ -32,7 +32,6 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import InputLayout
-from vllm.attention.selector import get_selected_backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -178,19 +177,6 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
-        # TODO: make the backend advertise its required input layout and 'features' (e.g. fused rotary embedding application) and use that instead of relying on the particular implementation.
-        selected_backend = get_selected_backend()
-        if selected_backend == _Backend.TKE:
-            self.input_layout = InputLayout.CONTIGUOUS_QKV
-            self.backend_applies_rotary_embedding = True
-        else:
-            self.input_layout = InputLayout.SPLIT_QKV
-            self.backend_applies_rotary_embedding = False
-
-        if not self.backend_applies_rotary_embedding:
-            self._init_rotary_emb(config,
-                                  rope_scaling=rope_scaling,
-                                  quant_config=quant_config)
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -201,8 +187,17 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            input_layout=self.input_layout,
         )
+
+        
+
+        self.input_layout = self.attn.attn_backend.get_input_layout()
+        self.backend_applies_rotary_embedding = self.attn.attn_backend.get_backend_applies_rotary_embedding()
+
+        if not self.backend_applies_rotary_embedding:
+            self._init_rotary_emb(config,
+                                  rope_scaling=rope_scaling,
+                                  quant_config=quant_config)
 
     def forward(
         self,

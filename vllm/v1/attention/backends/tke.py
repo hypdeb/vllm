@@ -15,6 +15,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    InputLayout,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
@@ -96,6 +97,17 @@ class TkeAttentionBackend(AttentionBackend):
         # NOTE: 3 and 2 are swapped because the TRTLLM layout within blocks is [num_heads, num_tokens, dimension]
         return (0, 1, 3, 2, 4)
 
+    @staticmethod
+    def get_output_dtype() -> torch.dtype:
+        return torch.float8_e4m3fn
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.CONTIGUOUS_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return True
 
 @dataclass
 class TkeMetadata:

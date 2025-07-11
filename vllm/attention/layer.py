@@ -24,19 +24,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
-
-class InputLayout(Enum):
-    """
-    The types of query, key, value layouts for the attention operation.
-    Different implementations might require different layouts.
-    """
-
-    # The default vLLM attention input layout where the query, keys and values are provided separately as tensors of dimensions [num_tokens, num_heads * head_size], [num_tokens, num_kv_heads * head_size], and [num_tokens, num_kv_heads * head_size] respectively.
-    SPLIT_QKV = "split_qkv"
-
-    # An input layout where the query, keys and values are provided as a single tensor of dimensions [num_tokens, (num_heads + 2*num_kv_heads) * head_size].
-    CONTIGUOUS_QKV = "fused_qkv"
-
+from vllm.attention.backends.abstract import InputLayout
 
 class Attention(nn.Module):
     """Attention layer.
@@ -66,7 +54,6 @@ class Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
-        input_layout: InputLayout = InputLayout.SPLIT_QKV,
         **extra_impl_args,
     ) -> None:
         """
@@ -151,6 +138,9 @@ class Attention(nn.Module):
                                         is_attention_free,
                                         blocksparse_params is not None,
                                         use_mla=use_mla)
+        
+        self.attn_backend = attn_backend
+
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
@@ -198,8 +188,6 @@ class Attention(nn.Module):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
-        self.input_layout = input_layout
-
     def forward(
         self,
         query: torch.Tensor,
@@ -224,13 +212,16 @@ class Attention(nn.Module):
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+        
+
+
         if self.use_output:
             output_shape: torch.Size | tuple[int, int]
-            if self.input_layout == InputLayout.SPLIT_QKV:
+            if self.attn_backend.get_input_layout() == InputLayout.SPLIT_QKV:
                 output_shape = (output_shape
                                 if output_shape is not None else query.shape)
                 output = torch.zeros(output_shape,
-                                     dtype=query.dtype,
+                                     dtype=self.attn_backend.get_output_dtype(),
                                      device=query.device)
                 # We skip reshaping query, key and value tensors for the MLA
                 # backend since these tensors have different semantics and are
@@ -246,16 +237,21 @@ class Attention(nn.Module):
                     if value is not None:
                         value = value.view(-1, self.num_kv_heads,
                                            self.head_size)
-            elif self.input_layout == InputLayout.CONTIGUOUS_QKV:
+            elif self.attn_backend.get_input_layout() == InputLayout.CONTIGUOUS_QKV:
                 output_shape = (output_shape if output_shape is not None else
                                 (query.shape[0], q_dimension))
                 output = torch.zeros(output_shape,
-                                     dtype=query.dtype,
+                                     dtype=self.attn_backend.get_output_dtype(),
                                      device=query.device)
                 key = None  # type: ignore
                 value = None  # type: ignore
             else:
-                raise ValueError(f"Invalid input layout: {self.input_layout}")
+                raise ValueError(f"Invalid input layout: {self.attn_backend.get_input_layout()}")
+
+
+
+
+            
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
