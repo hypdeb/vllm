@@ -20,7 +20,7 @@ build-vllm-image:
 vllm-setup:
 	git clone hypdeb/vllm
 	git checkout dan_branch
-	VLLM_USE_PRECOMPILED=1 pip install --editable .
+	VLLM_USE_PRECOMPILED=1 pip install --editable .[bench]
 	pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
 force-reinstall-tke:
