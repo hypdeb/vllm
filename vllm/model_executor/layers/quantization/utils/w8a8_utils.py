@@ -345,7 +345,7 @@ class Fp8LinearOp:
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[1]]
 
-        if out_dtype is None:
+        if out_dtype is None: # AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
             out_dtype = input.dtype
 
         # If input not quantized
