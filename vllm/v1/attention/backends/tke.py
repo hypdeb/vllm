@@ -149,9 +149,6 @@ class TkeMetadata:
     # The number of generation tokens in the batch.
     num_generation_tokens: int
 
-    # A buffer to store the fp8 attention outputs before converting them to bf16 and returning them.
-    fp8_output_buffer: torch.Tensor
-
 
 class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
@@ -304,15 +301,6 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             requires_grad=False,
         ).contiguous()
 
-        # The kernel produces FP8 outputs, but the backend is expected to return BF16 data.
-        self.fp8_output_buffer = torch.zeros(
-            self.runner.max_num_tokens,
-            self.runner.num_query_heads *
-            self.runner.vllm_config.model_config.get_head_size(),
-            device=torch.device("cuda"),
-            dtype=torch.float8_e4m3fn,
-            requires_grad=False,
-        ).contiguous()
 
         # Buffer to store the sequence lengths on the host. Required by the ops.
         self.sequence_lengths_host = torch.zeros(
@@ -385,7 +373,6 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             num_context_tokens=self._num_context_tokens,
             num_generation_sequences=self._num_generation_sequences,
             num_generation_tokens=self._num_generation_tokens,
-            fp8_output_buffer=self.fp8_output_buffer,
         )
 
 
@@ -472,7 +459,7 @@ class TkeImpl(AttentionImpl):
                 kvCacheBlockOffsets=attn_metadata.block_table.block_table,
                 kvCachePoolPtr=kv_cache.view(torch.int8),
                 rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
-                output=attn_metadata.fp8_output_buffer.view(torch.int8),
+                output=output.view(torch.int8),
                 workspace=attn_metadata.workspace,
                 stream=cuda_stream.cuda_stream,
             )
@@ -493,13 +480,11 @@ class TkeImpl(AttentionImpl):
                 block_table[attn_metadata.num_context_sequences:],
                 kvCachePoolPtr=kv_cache.view(torch.int8),
                 rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
-                output=attn_metadata.fp8_output_buffer.view(torch.int8),
+                output=output.view(torch.int8),
                 workspace=attn_metadata.workspace,
                 stream=cuda_stream.cuda_stream,
             )
 
-        num_tokens = attn_metadata.common_attn_metadata.num_actual_tokens
-        output[:num_tokens].copy_(attn_metadata.fp8_output_buffer[:num_tokens])
         return output
 
 

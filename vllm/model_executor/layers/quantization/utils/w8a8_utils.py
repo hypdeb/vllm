@@ -306,9 +306,9 @@ class Fp8LinearOp:
                  act_quant_static: bool,
                  cutlass_fp8_supported: bool = cutlass_fp8_supported(),
                  act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
-                 pad_output: Optional[bool] = None):
+                 pad_output: Optional[bool] = None, skip_scaling: bool = True):
         self.cutlass_fp8_supported = cutlass_fp8_supported
-
+        self.skip_scaling = skip_scaling
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
@@ -345,7 +345,7 @@ class Fp8LinearOp:
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[1]]
 
-        if out_dtype is None: # AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        if out_dtype is None:
             out_dtype = input.dtype
 
         # If input not quantized
@@ -356,8 +356,10 @@ class Fp8LinearOp:
                 input_scale,
                 input_scale_ub,
             )
-        else:
+        elif self.skip_scaling is False:
             qinput, x_scale = input_2d, input_scale
+        else:
+            qinput, x_scale = input_2d, torch.tensor(1.0, device=input_2d.device)
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
