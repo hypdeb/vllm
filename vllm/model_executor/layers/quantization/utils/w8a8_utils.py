@@ -325,7 +325,8 @@ class Fp8LinearOp:
         self.act_quant_group_shape = act_quant_group_shape
         self.quant_fp8 = QuantFP8(static=act_quant_static,
                                   group_shape=act_quant_group_shape,
-                                  num_token_padding=self.output_padding)
+                                  num_token_padding=self.output_padding) 
+        self.dummy_scale = None
 
     def apply(
         self,
@@ -359,7 +360,10 @@ class Fp8LinearOp:
         elif self.skip_scaling is False:
             qinput, x_scale = input_2d, input_scale
         else:
-            qinput, x_scale = input_2d, torch.tensor(1.0, device=input_2d.device)
+            qinput = input_2d
+            if self.dummy_scale is None:
+                self.dummy_scale = torch.tensor(1.0, device=input_2d.device)
+            x_scale = self.dummy_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
