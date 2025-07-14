@@ -102,7 +102,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_output_dtype() -> torch.dtype:
-        return torch.float8_e4m3fn
+        return torch.bfloat16
 
     @staticmethod
     def get_input_layout() -> InputLayout:

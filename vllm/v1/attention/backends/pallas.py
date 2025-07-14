@@ -13,7 +13,7 @@ from torch_xla._internal.jax_workarounds import requires_jax
 from torch_xla.experimental.custom_kernel import XLA_LIB
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
+                                              AttentionLayer, AttentionType, InputLayout)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -99,6 +99,18 @@ class PallasAttentionBackend(AttentionBackend):
         if page_size >= 256:
             return 256
         return page_size
+    
+    @staticmethod
+    def get_output_dtype() -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 
 @dataclass

@@ -14,7 +14,7 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionType)
+                                              AttentionType, InputLayout)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
@@ -147,6 +147,17 @@ class FlashInferBackend(AttentionBackend):
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
+    @staticmethod
+    def get_output_dtype() -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 @dataclass
 class FlashInferMetadata:

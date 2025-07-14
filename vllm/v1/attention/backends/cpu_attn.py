@@ -10,7 +10,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
-                                              is_quantized_kv_cache)
+                                              is_quantized_kv_cache, InputLayout)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
@@ -84,6 +84,17 @@ class TorchSDPABackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
+    @staticmethod
+    def get_output_dtype() -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 @dataclass
 class TorchSDPAMetadata(AttentionMetadata):
