@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
+from vllm.attention.backends.abstract import InputLayout
 
 class Attention(nn.Module):
     """Attention layer.
@@ -136,6 +138,9 @@ class Attention(nn.Module):
                                         is_attention_free,
                                         blocksparse_params is not None,
                                         use_mla=use_mla)
+        
+        self.attn_backend = attn_backend
+
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
@@ -198,30 +203,51 @@ class Attention(nn.Module):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+        q_dimension = self.head_size * self.num_heads
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+        
+
+
         if self.use_output:
-            output_shape = (output_shape
-                            if output_shape is not None else query.shape)
-            output = torch.zeros(output_shape,
-                                 dtype=query.dtype,
-                                 device=query.device)
-            hidden_size = output_shape[-1]
-            # We skip reshaping query, key and value tensors for the MLA
-            # backend since these tensors have different semantics and are
-            # processed differently.
-            if not self.use_mla:
-                # Reshape the query, key, and value tensors.
-                # NOTE(woosuk): We do this outside the custom op to minimize the
-                # CPU overheads from the non-CUDA-graph regions.
-                query = query.view(-1, self.num_heads, self.head_size)
-                output = output.view(-1, self.num_heads, self.head_size)
-                if key is not None:
-                    key = key.view(-1, self.num_kv_heads, self.head_size)
-                if value is not None:
-                    value = value.view(-1, self.num_kv_heads, self.head_size)
+            output_shape: torch.Size | tuple[int, int]
+            if self.attn_backend.get_input_layout() == InputLayout.SPLIT_QKV:
+                output_shape = (output_shape
+                                if output_shape is not None else query.shape)
+                output = torch.zeros(output_shape,
+                                     dtype=self.attn_backend.get_output_dtype(),
+                                     device=query.device)
+                # We skip reshaping query, key and value tensors for the MLA
+                # backend since these tensors have different semantics and are
+                # processed differently.
+                if not self.use_mla:
+                    # Reshape the query, key, and value tensors.
+                    # NOTE(woosuk): We do this outside the custom op to minimize the
+                    # CPU overheads from the non-CUDA-graph regions.
+                    query = query.view(-1, self.num_heads, self.head_size)
+                    output = output.view(-1, self.num_heads, self.head_size)
+                    if key is not None:
+                        key = key.view(-1, self.num_kv_heads, self.head_size)
+                    if value is not None:
+                        value = value.view(-1, self.num_kv_heads,
+                                           self.head_size)
+            elif self.attn_backend.get_input_layout() == InputLayout.CONTIGUOUS_QKV:
+                output_shape = (output_shape if output_shape is not None else
+                                (query.shape[0], q_dimension))
+                output = torch.zeros(output_shape,
+                                     dtype=self.attn_backend.get_output_dtype(),
+                                     device=query.device)
+                key = None  # type: ignore
+                value = None  # type: ignore
+            else:
+                raise ValueError(f"Invalid input layout: {self.attn_backend.get_input_layout()}")
+
+
+
+
+            
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
@@ -238,7 +264,7 @@ class Attention(nn.Module):
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
-            return output.view(-1, hidden_size)
+            return output.view(-1, q_dimension)
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()
