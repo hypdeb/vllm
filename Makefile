@@ -18,8 +18,6 @@ build-vllm-image:
 	$(call add_local_user,flashinfer_vllm_dev:7204195724929729558)
 
 vllm-setup:
-	git clone hypdeb/vllm
-	git checkout dan_branch
 	VLLM_USE_PRECOMPILED=1 pip install --editable .[bench]
 	pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
@@ -151,6 +149,7 @@ vllm-sample-tke: delete-vllm-cache
 	--num-iters 1 \
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
+	--enforce-eager \
 	--tensor-parallel-size 4 > tke.txt 2>&1
 
 vllm-sample-flash-attn: delete-vllm-cache
@@ -161,6 +160,7 @@ vllm-sample-flash-attn: delete-vllm-cache
 	--num-iters 1 \
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
+	--enforce-eager \
 	--tensor-parallel-size 4 > flash_attn.txt 2>&1
 
 all-samples: vllm-sample-flash-attn vllm-sample-tke vllm-sample-flashinfer-v1
