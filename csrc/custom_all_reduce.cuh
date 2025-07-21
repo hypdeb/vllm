@@ -536,6 +536,7 @@ class CustomAllreduce {
                                std::to_string(kMaxBlocks) + ". Got " +
                                std::to_string(block_limit));
 
+    std::cout << "allreduce start" << std::endl;
     RankData* ptrs;
     cudaStreamCaptureStatus status;
     CUDACHECK(cudaStreamIsCapturing(stream, &status));
@@ -561,12 +562,15 @@ class CustomAllreduce {
 #define REDUCE_CASE(ngpus)                            \
   case ngpus: {                                       \
     if (world_size_ == 2) {                           \
+      std::cout << "cross_device_reduce_1stage" << std::endl; \
       KL(ngpus, cross_device_reduce_1stage);          \
     } else if (fully_connected_) {                    \
       if ((world_size_ <= 4 && bytes < 512 * 1024) || \
           (world_size_ <= 8 && bytes < 256 * 1024)) { \
+        std::cout << "cross_device_reduce_1stage" << std::endl; \
         KL(ngpus, cross_device_reduce_1stage);        \
       } else {                                        \
+        std::cout << "cross_device_reduce_2stage" << std::endl; \
         KL(ngpus, cross_device_reduce_2stage);        \
       }                                               \
     }                                                 \
