@@ -19,7 +19,7 @@ build-vllm-image:
 	$(call add_local_user,flashinfer_vllm_dev:7204195724929729558)
 
 vllm-setup:
-	pip install --editable .[bench]
+	VLLM_USE_PRECOMPILED=1 pip install --editable .[bench]
 	# pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
 vllm-cpp-rebuild:
@@ -150,6 +150,7 @@ vllm-sample-tke: delete-vllm-cache
 	--num-iters 1 \
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
+	--enforce-eager \
 	--tensor-parallel-size 4 > tke.txt 2>&1
 
 vllm-sample-flash-attn: delete-vllm-cache
@@ -160,9 +161,20 @@ vllm-sample-flash-attn: delete-vllm-cache
 	--num-iters 1 \
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
+	--tensor-parallel-size 4  > flash_attn.txt 2>&1
+
+vllm-sample-flash-attn-draft: delete-vllm-cache
+	$(FLASH_ATTN_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	--model /scratch/usr/quantized_model/ \
+	--batch-size 1 \
+	--prompts-file sample_prompts.txt \
+	--num-iters 1 \
+	--num-iters-warmup 0 \
+	--kv-cache-dtype fp8 \
 	--tensor-parallel-size 4 \
 	--draft-model-path $(DRAFT_MODEL_PATH) \
-	--num-speculative-tokens 5 > flash_attn.txt 2>&1
+	--num-speculative-tokens 5 > flash_attn_draft.txt 2>&1
+
 
 all-samples: vllm-sample-flash-attn vllm-sample-tke vllm-sample-flashinfer-v1
 

@@ -215,9 +215,14 @@ class InputPreprocessor:
         if encoder_config and encoder_config.get("do_lower_case", False):
             prompt = prompt.lower()
 
-        return tokenizer.encode(prompt=prompt,
-                                lora_request=lora_request,
-                                **tokenization_kwargs)
+        token_ids = tokenizer.encode(prompt=prompt,
+                                     lora_request=lora_request,
+                                     **tokenization_kwargs)
+        
+        # Print input sequence length in tokens
+        print(f"[TOKENIZATION] Input sequence length: {len(token_ids)} tokens")
+        
+        return token_ids
 
     async def _tokenize_prompt_async(
         self,
@@ -232,9 +237,14 @@ class InputPreprocessor:
         tokenizer = self.get_tokenizer_group()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
-        return await tokenizer.encode_async(prompt=prompt,
-                                            lora_request=lora_request,
-                                            **tokenization_kwargs)
+        token_ids = await tokenizer.encode_async(prompt=prompt,
+                                                 lora_request=lora_request,
+                                                 **tokenization_kwargs)
+        
+        # Print input sequence length in tokens
+        print(f"[TOKENIZATION] Input sequence length: {len(token_ids)} tokens")
+        
+        return token_ids
 
     def _get_mm_tokenizer(
         self,

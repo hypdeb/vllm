@@ -152,6 +152,7 @@ def main():
                     temperature=0.0,
                     top_p=1.0,
                     max_tokens=output_length,
+                    ignore_eos=True,
                 ))
 
         batch_prompts = batch_prompts * 1
