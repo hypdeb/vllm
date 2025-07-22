@@ -342,48 +342,6 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
         return modified_batch
 
-    def reorder_batch_original(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> bool:
-        """
-        Reorders the sequences in the batch so that the "decode" sequences are at the back of the batch.
-        We identify "decode" sequences as those with a single scheduled token, but it shouldn't matter: we can in theory also use our generation kernels for 1-token long context requests.
-        """
-
-        decode_indexes: List[int] = []
-        prefill_indexes: List[int] = []
-        num_prefill_tokens: int = 0
-        num_decode_tokens: int = 0
-
-        for index_in_batch, request_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            if num_tokens == 1:
-                decode_indexes.append(index_in_batch)
-                num_decode_tokens += num_tokens
-            else:
-                prefill_indexes.append(index_in_batch)
-                num_prefill_tokens += num_tokens
-
-        num_decodes = len(decode_indexes)
-        num_prefills = len(prefill_indexes)
-        modified_batch = False
-
-        for i in range(1, min(num_decodes, num_prefills) + 1):
-            prefill_idx = prefill_indexes[num_prefills - i]
-            decode_idx = decode_indexes[i - 1]
-            # If prefill sequence is already positioned before decode sequence, we're done
-            if prefill_idx <= decode_idx:
-                break
-            input_batch.swap_states(prefill_idx, decode_idx)
-            modified_batch = True
-
-        # This is an 'arbitrary' split from vLLM's perspective, so we need to calculate these and store them ourselves.
-        self._num_context_sequences = num_prefills
-        self._num_context_tokens = num_prefill_tokens
-        self._num_generation_sequences = num_decodes
-        self._num_generation_tokens = num_decode_tokens
-
-        return modified_batch
-
     def build(
         self,
         common_prefix_len: int,
@@ -465,47 +423,42 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
-        input_sequence_lengths_device = attn_metadata.common_attn_metadata.query_start_loc.diff(
-        )
         cuda_stream = current_stream()
         if attn_metadata.num_context_sequences > 0:
-            max_sequence_length = attn_metadata.sequence_lengths_host[:
-                                                                      attn_metadata
-                                                                      .
-                                                                      num_context_sequences].max(
+
+            # TODO: move this to scheduler?
+            max_sequence_length = attn_metadata.sequence_lengths_host[attn_metadata.num_generation_sequences:].max(
                                                                       ).item()
             run_context_inplace(
                 op=attn_metadata.op,
                 numContextSequences=attn_metadata.num_context_sequences,
                 numContextTokens=attn_metadata.num_context_tokens,
                 maxSequenceLength=int(max_sequence_length),
-                qkv=query,
-                sequenceLengthsDevice=attn_metadata.common_attn_metadata.
-                seq_lens,
-                inputSequenceLengthsDevice=input_sequence_lengths_device,
+                qkv=query[attn_metadata.num_generation_tokens:],
+                sequenceLengthsDevice=attn_metadata.common_attn_metadata.seq_lens[attn_metadata.num_generation_sequences:],
+                inputSequenceLengthsDevice=attn_metadata.common_attn_metadata.query_lens[attn_metadata.num_generation_sequences:],
                 kvCacheBlockOffsets=attn_metadata.common_attn_metadata.
-                block_table_tensor,
+                block_table_tensor[attn_metadata.num_generation_sequences:],
                 kvCachePoolPtr=kv_cache.view(torch.int8),
                 rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
-                output=output.view(torch.int8),
+                output=output[attn_metadata.num_generation_tokens:].view(torch.int8),
                 workspace=attn_metadata.workspace,
                 stream=cuda_stream.cuda_stream,
             )
         if attn_metadata.num_generation_sequences > 0:
             max_sequence_length = attn_metadata.sequence_lengths_host[
-                attn_metadata.num_context_sequences:].max().item()
+                :attn_metadata.num_generation_sequences].max().item()
             run_generation_inplace(
                 op=attn_metadata.op,
                 numGenerationSequences=attn_metadata.num_generation_sequences,
                 numGenerationTokens=attn_metadata.num_generation_tokens,
                 maxSequenceLength=int(max_sequence_length),
-                qkv=query[attn_metadata.num_context_tokens:],
+                qkv=query,
                 sequenceLengthsDevice=attn_metadata.common_attn_metadata.
-                seq_lens[attn_metadata.num_context_sequences:],
-                inputSequenceLengthsDevice=input_sequence_lengths_device[
-                    attn_metadata.num_context_sequences:],
+                seq_lens,
+                inputSequenceLengthsDevice=attn_metadata.common_attn_metadata.query_lens,
                 kvCacheBlockOffsets=attn_metadata.common_attn_metadata.
-                block_table_tensor[attn_metadata.num_context_sequences:],
+                block_table_tensor,
                 kvCachePoolPtr=kv_cache.view(torch.int8),
                 rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
                 output=output.view(torch.int8),

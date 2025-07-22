@@ -114,6 +114,20 @@ def main():
     effective_kv_cache_dtype = args.kv_cache_dtype if args.kv_cache_dtype else "auto"
     print(f"Effective kv_cache_dtype: {effective_kv_cache_dtype}")
     # Initialize model
+    speculative_config = None
+    if args.num_speculative_tokens and args.draft_model_path:
+        speculative_config = {
+            "model":
+            args.draft_model_path,
+            "method":
+            "draft_model",
+            "num_speculative_tokens":
+            args.num_speculative_tokens,
+            "target_model_config":
+            ModelConfig(model=args.model),
+            "target_parallel_config":
+            ParallelConfig(tensor_parallel_size=args.tensor_parallel_size)
+        }
     llm = LLM(
         model=args.model,
         trust_remote_code=True,
@@ -126,18 +140,7 @@ def main():
         max_num_seqs=args.batch_size,
         enable_prefix_caching=False,
         enforce_eager=args.enforce_eager,
-        speculative_config={
-            "model":
-            args.draft_model_path,
-            "method":
-            "draft_model",
-            "num_speculative_tokens":
-            args.num_speculative_tokens,
-            "target_model_config":
-            ModelConfig(model=args.model),
-            "target_parallel_config":
-            ParallelConfig(tensor_parallel_size=args.tensor_parallel_size)
-        })
+        speculative_config=speculative_config)
 
     # Process prompts as a batch with individual sampling parameters
     def process_prompts():
