@@ -145,13 +145,13 @@ vllm-sample-flashinfer-v1: delete-vllm-cache
 vllm-sample-tke: delete-vllm-cache
 	$(TKE_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
-	--batch-size 1 \
+	--batch-size 8 \
 	--prompts-file sample_prompts.txt \
 	--num-iters 1 \
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
 	--enforce-eager \
-	--tensor-parallel-size 4 > tke.txt 2>&1
+	--tensor-parallel-size 4 > tke_reorder.txt 2>&1
 
 vllm-sample-flash-attn: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
@@ -182,7 +182,7 @@ all-samples: vllm-sample-flash-attn vllm-sample-tke vllm-sample-flashinfer-v1
 ######################## Accuracy #########################################################
 ###########################################################################################
 
-ACCURACY_BATCH_SIZE ?= 8
+ACCURACY_BATCH_SIZE ?= 16
 
 # Infra
 install-lm-eval:
