@@ -41,12 +41,15 @@ class VLLMServerManager:
     def start_server(self,
                      backend_env: Dict[str, str],
                      backend_name: str,
-                     enforce_eager: bool = False) -> bool:
+                     enforce_eager: bool,
+                     full_cuda_graph: bool) -> bool:
         """Start vLLM server with specified backend environment and execution mode."""
         execution_mode = "eager" if enforce_eager else "non-eager"
         print(
             f"Starting {backend_name} server ({execution_mode} mode) on port {self.port}..."
         )
+
+        cuda_graph_config = "full" if full_cuda_graph else "none"
 
         # Set up environment
         env = os.environ.copy()
@@ -65,11 +68,12 @@ class VLLMServerManager:
         if enforce_eager:
             cmd.append("--enforce-eager")
         else:
-            # Add compilation config for full CUDA graph when not in eager mode
-            cmd.extend(["--compilation-config", '{"full_cuda_graph": true}'])
+            if full_cuda_graph:
+                # Add compilation config for full CUDA graph when not in eager mode
+                cmd.extend(["--compilation-config", '{"full_cuda_graph": true}'])
 
         # Start server with improved process management
-        self.log_file = f"{backend_name.lower()}_{execution_mode}_server.log"
+        self.log_file = f"{backend_name.lower()}_{execution_mode}_{cuda_graph_config}_server.log"
 
         print(f"Starting server with command: {' '.join(cmd)}")
         print(f"Environment: {backend_env}")
@@ -274,11 +278,18 @@ class BenchmarkRunner:
         execution_mode = config['execution_mode']
         num_requests = concurrency * 10
 
-        result_file = self.output_path / f"{concurrency}-{input_len}-{output_len}-{backend_name.lower()}-{execution_mode}.json"
+        # Include CUDA graph info in filename if available
+        # Use underscores as separators for unambiguous parsing
+        filename_parts = [str(concurrency), str(input_len), str(output_len), backend_name.lower(), execution_mode]
+        if 'cuda_graph' in config:
+            filename_parts.append(config['cuda_graph'])
+        
+        result_file = self.output_path / f"{'_'.join(filename_parts)}.json"
 
         print(
             f"Running benchmark: concurrency={concurrency}, input_len={input_len}, "
             f"output_len={output_len}, backend={backend_name}, mode={execution_mode}"
+            + (f", cuda_graph={config['cuda_graph']}" if 'cuda_graph' in config else "")
         )
 
         # Verify server is still running before starting benchmark
@@ -323,8 +334,8 @@ class BenchmarkRunner:
 def generate_test_configurations() -> List[Dict]:
     """Generate test configurations for benchmarking."""
     concurrency_levels = [1, 4]
-    output_lengths = [1]
-    input_lengths = [8000, 16000, 32000, 64000]
+    output_lengths = [100]
+    input_lengths = [32000, 64000]
 
     configs = []
     for concurrency in concurrency_levels:
@@ -350,79 +361,107 @@ def run_backend_benchmarks(
 
     for execution_mode in execution_modes:
         enforce_eager = execution_mode == "eager"
-        mode_results = []
-
-        print(f"\n{'='*40}")
-        print(f"Testing {backend_name} in {execution_mode} mode")
-        print(f"{'='*40}")
-
-        # Start server for this backend and execution mode
-        server_started = False
-        try:
-            server_started = server_manager.start_server(
-                backend_env, backend_name, enforce_eager)
-
-            if not server_started:
-                print(
-                    f"Failed to start {backend_name} server in {execution_mode} mode"
-                )
-                mode_results = [False] * len(test_configs)
+        
+        # Determine CUDA graph configurations to test
+        if backend_name == "flash-attn" and not enforce_eager:
+            # For flash-attn in non-eager mode, test both with and without full CUDA graph
+            cuda_graph_configs = [False, True]
+        else:
+            # For all other cases, only test without full CUDA graph
+            cuda_graph_configs = [False]
+        
+        for full_cuda_graph in cuda_graph_configs:
+            mode_results = []
+            
+            # Create a unique key for results that includes CUDA graph info when relevant
+            if backend_name == "flash-attn" and not enforce_eager:
+                result_key = f"{execution_mode}_{'full_cuda_graph' if full_cuda_graph else 'no_cuda_graph'}"
+                cuda_graph_desc = "with full CUDA graph" if full_cuda_graph else "without full CUDA graph"
             else:
-                print(
-                    f"Successfully started {backend_name} server in {execution_mode} mode"
-                )
+                result_key = execution_mode
+                cuda_graph_desc = ""
 
-                # Run all test configurations
-                for i, config in enumerate(test_configs):
-                    config['backend_name'] = backend_name
-                    config['execution_mode'] = execution_mode
+            print(f"\n{'='*40}")
+            if cuda_graph_desc:
+                print(f"Testing {backend_name} in {execution_mode} mode {cuda_graph_desc}")
+            else:
+                print(f"Testing {backend_name} in {execution_mode} mode")
+            print(f"{'='*40}")
 
-                    print(f"\nRunning test {i+1}/{len(test_configs)}")
+            # Start server for this backend and execution mode
+            server_started = False
+            try:
+                server_started = server_manager.start_server(
+                    backend_env, backend_name, enforce_eager, full_cuda_graph)
 
-                    # Verify server is still running before each test
-                    if not server_manager.is_running():
-                        print(
-                            f"Server stopped running, cannot continue with remaining tests"
-                        )
-                        mode_results.extend(
-                            [False] * (len(test_configs) - len(mode_results)))
-                        break
+                if not server_started:
+                    desc_suffix = f" {cuda_graph_desc}" if cuda_graph_desc else ""
+                    print(
+                        f"Failed to start {backend_name} server in {execution_mode} mode{desc_suffix}"
+                    )
+                    mode_results = [False] * len(test_configs)
+                else:
+                    desc_suffix = f" {cuda_graph_desc}" if cuda_graph_desc else ""
+                    print(
+                        f"Successfully started {backend_name} server in {execution_mode} mode{desc_suffix}"
+                    )
 
-                    success = benchmark_runner.run_benchmark(
-                        config, server_manager)
-                    mode_results.append(success)
+                    # Run all test configurations
+                    for i, config in enumerate(test_configs):
+                        config['backend_name'] = backend_name
+                        config['execution_mode'] = execution_mode
+                        # Add CUDA graph info to config for result file naming
+                        if backend_name == "flash-attn" and not enforce_eager:
+                            config['cuda_graph'] = "full" if full_cuda_graph else "none"
 
-                    if not success:
-                        print(f"Benchmark failed, checking server status...")
+                        print(f"\nRunning test {i+1}/{len(test_configs)}")
+
+                        # Verify server is still running before each test
                         if not server_manager.is_running():
                             print(
-                                f"Server crashed during benchmark, stopping remaining tests"
+                                f"Server stopped running, cannot continue with remaining tests"
                             )
                             mode_results.extend(
-                                [False] *
-                                (len(test_configs) - len(mode_results)))
+                                [False] * (len(test_configs) - len(mode_results)))
                             break
-                        else:
-                            print(
-                                f"Server still running, continuing with next test"
-                            )
 
-        except Exception as e:
-            print(
-                f"Exception occurred while running {backend_name} ({execution_mode}): {e}"
-            )
-            mode_results = [False] * len(test_configs)
-        finally:
-            # Always stop the server, regardless of what happened
-            if server_started:
+                        success = benchmark_runner.run_benchmark(
+                            config, server_manager)
+                        mode_results.append(success)
+
+                        if not success:
+                            print(f"Benchmark failed, checking server status...")
+                            if not server_manager.is_running():
+                                print(
+                                    f"Server crashed during benchmark, stopping remaining tests"
+                                )
+                                mode_results.extend(
+                                    [False] *
+                                    (len(test_configs) - len(mode_results)))
+                                break
+                            else:
+                                print(
+                                    f"Server still running, continuing with next test"
+                                )
+
+            except Exception as e:
+                desc_suffix = f" {cuda_graph_desc}" if cuda_graph_desc else ""
                 print(
-                    f"\nShutting down {backend_name} server ({execution_mode} mode)"
+                    f"Exception occurred while running {backend_name} ({execution_mode}{desc_suffix}): {e}"
                 )
-                server_manager.stop_server()
-            else:
-                print(f"Server was never started, no cleanup needed")
+                mode_results = [False] * len(test_configs)
+            finally:
+                # Always stop the server, regardless of what happened
+                if server_started:
+                    desc_suffix = f" {cuda_graph_desc}" if cuda_graph_desc else ""
+                    print(
+                        f"\nShutting down {backend_name} server ({execution_mode} mode{desc_suffix})"
+                    )
+                    server_manager.stop_server()
+                else:
+                    print(f"Server was never started, no cleanup needed")
 
-        all_results[execution_mode] = mode_results
+            all_results[result_key] = mode_results
 
     return all_results
 
@@ -457,13 +496,13 @@ def main():
     parser.add_argument("--backends",
                         nargs="+",
                         choices=["tke", "flash-attn", "flashinfer"],
-                        default=["flash-attn"],
+                        default=["tke", "flash-attn"],
                         help="Backends to test")
     parser.add_argument(
         "--execution-modes",
         nargs="+",
         choices=["eager", "non-eager"],
-        default=["non-eager"],
+        default=["non-eager", "eager"],
         help="Execution modes to test (default: both eager and non-eager)")
 
     args = parser.parse_args()
@@ -482,7 +521,7 @@ def main():
         "flash-attn": ({
             "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
             "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_VLLM_V1"
-        }, "Flash-Attn"),
+        }, "flash-attn"),
         "flashinfer": ({
             "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
             "VLLM_ATTENTION_BACKEND": "FLASHINFER_VLLM_V1"
@@ -530,13 +569,24 @@ def main():
                 all_results[backend_name] = results
 
                 # Print results for this backend
-                for execution_mode in args.execution_modes:
-                    if execution_mode in results:
-                        successful = sum(results[execution_mode])
-                        total = len(results[execution_mode])
-                        print(
-                            f"\n{backend_configs[backend_name][1]} ({execution_mode}) Results: {successful}/{total} successful"
-                        )
+                for result_key, result_list in results.items():
+                    successful = sum(result_list)
+                    total = len(result_list)
+                    
+                    # Format the result key for display
+                    if result_key.endswith("_full_cuda_graph"):
+                        execution_mode = result_key[:-len("_full_cuda_graph")]
+                        display_key = f"{execution_mode} (full CUDA graph)"
+                    elif result_key.endswith("_no_cuda_graph"):
+                        execution_mode = result_key[:-len("_no_cuda_graph")]
+                        display_key = f"{execution_mode} (no CUDA graph)"
+                    else:
+                        # Regular result key
+                        display_key = result_key
+                    
+                    print(
+                        f"\n{backend_configs[backend_name][1]} ({display_key}) Results: {successful}/{total} successful"
+                    )
             except Exception as e:
                 print(f"Failed to run benchmarks for {backend_name}: {e}")
                 # Ensure server is stopped even if there's an error
@@ -572,14 +622,25 @@ def main():
     print(f"{'='*60}")
     for backend_name, backend_results in all_results.items():
         backend_display = backend_configs[backend_name][1]
-        for execution_mode in args.execution_modes:
-            if execution_mode in backend_results:
-                successful = sum(backend_results[execution_mode])
-                total = len(backend_results[execution_mode])
-                success_rate = (successful / total * 100) if total > 0 else 0
-                print(
-                    f"{backend_display:12} ({execution_mode:9}): {successful:3}/{total:3} successful ({success_rate:5.1f}%)"
-                )
+        for result_key, results in backend_results.items():
+            successful = sum(results)
+            total = len(results)
+            success_rate = (successful / total * 100) if total > 0 else 0
+            
+            # Format the result key for display
+            if result_key.endswith("_full_cuda_graph"):
+                execution_mode = result_key[:-len("_full_cuda_graph")]
+                display_key = f"{execution_mode} (full CG)"
+            elif result_key.endswith("_no_cuda_graph"):
+                execution_mode = result_key[:-len("_no_cuda_graph")]
+                display_key = f"{execution_mode} (no CG)"
+            else:
+                # Regular result key
+                display_key = result_key
+            
+            print(
+                f"{backend_display:12} ({display_key:12}): {successful:3}/{total:3} successful ({success_rate:5.1f}%)"
+            )
 
     print(f"\nResults saved to: {args.output_path}")
 

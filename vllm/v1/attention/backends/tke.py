@@ -300,8 +300,49 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False  # TODO: implement this
 
-    # TODO: this could use a unit test. A lot depends on this being correct.
     def reorder_batch(self, input_batch: InputBatch,
+                      scheduler_output: SchedulerOutput) -> bool:
+        """
+        Reorders the sequences in the batch so that the "decode" sequences are at the front of the batch.
+        We identify "decode" sequences as those with a single scheduled token, but it shouldn't matter: we can in theory also use our generation kernels for 1-token long context requests.
+        """
+
+        decode_indexes: List[int] = []
+        prefill_indexes: List[int] = []
+        num_prefill_tokens: int = 0
+        num_decode_tokens: int = 0
+
+        for index_in_batch, request_id in enumerate(input_batch.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens[request_id]
+            if num_tokens == 1:
+                decode_indexes.append(index_in_batch)
+                num_decode_tokens += num_tokens
+            else:
+                prefill_indexes.append(index_in_batch)
+                num_prefill_tokens += num_tokens
+
+        num_decodes = len(decode_indexes)
+        num_prefills = len(prefill_indexes)
+        modified_batch = False
+
+        for i in range(1, min(num_decodes, num_prefills) + 1):
+            decode_idx = decode_indexes[num_decodes - i]
+            prefill_idx = prefill_indexes[i - 1]
+            # If decode sequence is already positioned before prefill sequence, we're done
+            if decode_idx <= prefill_idx:
+                break
+            input_batch.swap_states(decode_idx, prefill_idx)
+            modified_batch = True
+
+        # This is an 'arbitrary' split from vLLM's perspective, so we need to calculate these and store them ourselves.
+        self._num_context_sequences = num_prefills
+        self._num_context_tokens = num_prefill_tokens
+        self._num_generation_sequences = num_decodes
+        self._num_generation_tokens = num_decode_tokens
+
+        return modified_batch
+
+    def reorder_batch_original(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
         """
         Reorders the sequences in the batch so that the "decode" sequences are at the back of the batch.

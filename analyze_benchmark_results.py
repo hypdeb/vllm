@@ -40,21 +40,45 @@ class BenchmarkAnalyzer:
                     data = json.load(f)
 
                 # Extract configuration from filename if possible
-                filename_parts = json_file.stem.split('-')
-                if len(filename_parts) >= 4:
-                    # Format: concurrency-input_len-output_len-backend.json
+                # New format: concurrency_inputlen_outputlen_backend_executionmode[_cudagraph].json
+                filename_parts = json_file.stem.split('_')
+                if len(filename_parts) >= 5:
                     try:
                         concurrency = int(filename_parts[0])
                         input_len = int(filename_parts[1])
                         output_len = int(filename_parts[2])
                         backend = filename_parts[3]
+                        execution_mode = filename_parts[4]
+                        
+                        # Check if CUDA graph info is present (6th part)
+                        if len(filename_parts) >= 6:
+                            cuda_graph = filename_parts[5]
+                        else:
+                            cuda_graph = 'none'
 
                         data['filename_concurrency'] = concurrency
                         data['filename_input_len'] = input_len
                         data['filename_output_len'] = output_len
                         data['filename_backend'] = backend
-                    except (ValueError, IndexError):
-                        pass
+                        data['filename_execution_mode'] = execution_mode
+                        data['filename_is_eager'] = execution_mode == "eager"
+                        data['filename_cuda_graph'] = cuda_graph
+                        data['filename_full_cuda_graph'] = cuda_graph == "full"
+
+                    except (ValueError, IndexError) as e:
+                        print(f"Warning: Could not parse filename {json_file.name}: {e}")
+                        # Set defaults if parsing fails
+                        data['filename_execution_mode'] = "unknown"
+                        data['filename_is_eager'] = None
+                        data['filename_cuda_graph'] = "unknown"
+                        data['filename_full_cuda_graph'] = None
+                else:
+                    print(f"Warning: Filename {json_file.name} doesn't match expected format")
+                    # Set defaults for files that don't match expected format
+                    data['filename_execution_mode'] = "unknown"
+                    data['filename_is_eager'] = None
+                    data['filename_cuda_graph'] = "unknown"
+                    data['filename_full_cuda_graph'] = None
 
                 data['source_file'] = str(json_file.name)
                 self.results.append(data)
@@ -88,6 +112,14 @@ class BenchmarkAnalyzer:
         metrics['output_len'] = data.get('filename_output_len', 0)
         metrics['backend_name'] = data.get('filename_backend',
                                            data.get('backend', ''))
+
+        # Execution mode information
+        metrics['execution_mode'] = data.get('filename_execution_mode', 'unknown')
+        metrics['is_eager'] = data.get('filename_is_eager', None)
+        
+        # CUDA graph information
+        metrics['cuda_graph'] = data.get('filename_cuda_graph', 'none')
+        metrics['full_cuda_graph'] = data.get('filename_full_cuda_graph', False)
 
         # Performance metrics
         metrics['duration_s'] = data.get('duration', 0)
@@ -168,7 +200,8 @@ class BenchmarkAnalyzer:
 
         # Define field order for better readability
         ordered_fields = [
-            'source_file', 'date', 'backend_name', 'model_id', 'concurrency',
+            'source_file', 'date', 'backend_name', 'model_id', 'execution_mode',
+            'is_eager', 'cuda_graph', 'full_cuda_graph', 'concurrency',
             'input_len', 'output_len', 'num_prompts', 'request_rate',
             'burstiness', 'max_concurrency', 'duration_s',
             'completed_requests', 'total_input_tokens', 'total_output_tokens',
@@ -195,7 +228,8 @@ class BenchmarkAnalyzer:
                 sorted_metrics = sorted(
                     all_metrics,
                     key=lambda x:
-                    (x.get('backend_name', ''), x.get('concurrency', 0),
+                    (x.get('backend_name', ''), x.get('execution_mode', ''), 
+                     x.get('cuda_graph', ''), x.get('concurrency', 0),
                      x.get('input_len', 0), x.get('output_len', 0)))
 
                 for metrics in sorted_metrics:
@@ -213,21 +247,44 @@ class BenchmarkAnalyzer:
         if not self.results:
             return
 
-        # Group by backend
-        backends = {}
+        # Group by backend, execution mode, and CUDA graph settings
+        groups = {}
         for result in self.results:
             backend = result.get('filename_backend',
                                  result.get('backend', 'unknown'))
-            if backend not in backends:
-                backends[backend] = []
-            backends[backend].append(result)
+            execution_mode = result.get('filename_execution_mode', 'unknown')
+            cuda_graph = result.get('filename_cuda_graph', 'none')
+            
+            # Create a composite key for grouping
+            key = f"{backend}_{execution_mode}_{cuda_graph}"
+            if key not in groups:
+                groups[key] = {
+                    'backend': backend,
+                    'execution_mode': execution_mode,
+                    'cuda_graph': cuda_graph,
+                    'results': []
+                }
+            groups[key]['results'].append(result)
 
         print(f"\n{'='*60}")
         print("BENCHMARK SUMMARY STATISTICS")
         print(f"{'='*60}")
 
-        for backend, results in backends.items():
-            print(f"\n{backend.upper()} Backend:")
+        for group_key, group_data in sorted(groups.items()):
+            backend = group_data['backend']
+            execution_mode = group_data['execution_mode']
+            cuda_graph = group_data['cuda_graph']
+            results = group_data['results']
+            
+            # Create a readable group name
+            group_name = f"{backend.upper()}"
+            if execution_mode != 'unknown':
+                group_name += f" ({execution_mode}"
+                if cuda_graph != 'none' and cuda_graph != 'unknown':
+                    group_name += f", CUDA graph: {cuda_graph}"
+                group_name += ")"
+            
+            print(f"\n{group_name}:")
             print(f"  Total benchmark runs: {len(results)}")
 
             # Calculate averages
@@ -311,3 +368,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Example file names (new underscore-separated format):
+# 1_32000_100_flash-attn_non-eager_none.json
+# 1_32000_100_flash-attn_non-eager_full.json
+# 1_64000_100_flash-attn_non-eager_none.json
+# 1_64000_100_flash-attn_non-eager_full.json
+# 4_32000_100_flash-attn_non-eager_none.json
+# 4_32000_100_flash-attn_non-eager_full.json
+# 4_64000_100_flash-attn_non-eager_none.json
+# 4_64000_100_flash-attn_non-eager_full.json
+# 1_32000_100_tke_non-eager.json
+# 1_64000_100_tke_non-eager.json
+# 4_32000_100_tke_non-eager.json
+# 4_64000_100_tke_non-eager.json
