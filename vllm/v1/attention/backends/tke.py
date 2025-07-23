@@ -115,6 +115,24 @@ class TkeMetadata:
     # The shared attention metadata.
     common_attn_metadata: CommonAttentionMetadata
 
+    # Pre-computed sequence lengths for the prefill/context sequences in the batch.
+    context_sequence_lengths_device: torch.Tensor
+
+    # Pre-computed input sequence lengths for the prefill/context sequences in the batch.
+    context_input_sequence_lengths_device: torch.Tensor
+
+    # Pre-computed block table tensor for the prefill/context sequences in the batch.
+    context_block_table_tensor: torch.Tensor
+
+    # Pre-computed max sequence length for the prefill/context sequences in the batch.
+    context_max_sequence_length: int
+
+    # Pre-computed max sequence length for the generation sequences in the batch.
+    generation_max_sequence_length: int
+
+    # Pre-computed max input sequence length for the generation sequences in the batch.
+    generation_max_input_sequence_length: int
+
     # The fixed state of the attention operation.
     op: AttentionOp
 
@@ -347,8 +365,18 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
     ):
+        context_max_sequence_length = common_attn_metadata.seq_lens_cpu[self._num_generation_sequences:].max().item() if self._num_context_sequences > 0 else 0
+        generation_max_sequence_length = common_attn_metadata.seq_lens_cpu[:self._num_generation_sequences].max().item() if self._num_generation_sequences > 0 else 0
+        generation_max_input_sequence_length = common_attn_metadata.query_lens_cpu[:self._num_generation_sequences].max().item() if self._num_generation_sequences > 0 else 0
+
         return TkeMetadata(
             common_attn_metadata=common_attn_metadata,
+            context_sequence_lengths_device=common_attn_metadata.seq_lens[self._num_generation_sequences:],
+            context_input_sequence_lengths_device=common_attn_metadata.query_lens[self._num_generation_sequences:],
+            context_block_table_tensor=common_attn_metadata.block_table_tensor[self._num_generation_sequences:],
+            context_max_sequence_length=int(context_max_sequence_length),
+            generation_max_sequence_length=int(generation_max_sequence_length),
+            generation_max_input_sequence_length=int(generation_max_input_sequence_length),
             op=self.op,
             attention_layer_dimensions=self.attention_layer_dimensions,
             sequence_lengths_host=common_attn_metadata.seq_lens_cpu,
@@ -423,51 +451,48 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
+        # NOTE: we have removed all calls to tensor slicing and viewing from this function intentionally, at the cost of making the API of TKE a bit more complex.
         cuda_stream = current_stream()
         if attn_metadata.num_context_sequences > 0:
-
-            # TODO: move this to scheduler?
-            max_sequence_length = attn_metadata.sequence_lengths_host[attn_metadata.num_generation_sequences:].max(
-                                                                      ).item()
             run_context_inplace(
                 op=attn_metadata.op,
                 numContextSequences=attn_metadata.num_context_sequences,
                 numContextTokens=attn_metadata.num_context_tokens,
-                maxSequenceLength=int(max_sequence_length),
-                qkv=query[attn_metadata.num_generation_tokens:],
-                sequenceLengthsDevice=attn_metadata.common_attn_metadata.seq_lens[attn_metadata.num_generation_sequences:],
-                inputSequenceLengthsDevice=attn_metadata.common_attn_metadata.query_lens[attn_metadata.num_generation_sequences:],
-                kvCacheBlockOffsets=attn_metadata.common_attn_metadata.
-                block_table_tensor[attn_metadata.num_generation_sequences:],
-                kvCachePoolPtr=kv_cache.view(torch.int8),
+                maxSequenceLength=attn_metadata.context_max_sequence_length,
+                tokenOffset=attn_metadata.num_generation_tokens, # Generation or decode tokens come first in the batch.
+                qkv=query,
+                sequenceLengthsDevice=attn_metadata.context_sequence_lengths_device,
+                inputSequenceLengthsDevice=attn_metadata.context_input_sequence_lengths_device,
+                kvCacheBlockOffsets=attn_metadata.context_block_table_tensor,
+                kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
-                output=output[attn_metadata.num_generation_tokens:].view(torch.int8),
+                outputPtr=output.data_ptr(),
                 workspace=attn_metadata.workspace,
                 stream=cuda_stream.cuda_stream,
             )
+
         if attn_metadata.num_generation_sequences > 0:
-            max_sequence_length = attn_metadata.sequence_lengths_host[
-                :attn_metadata.num_generation_sequences].max().item()
             run_generation_inplace(
                 op=attn_metadata.op,
                 numGenerationSequences=attn_metadata.num_generation_sequences,
                 numGenerationTokens=attn_metadata.num_generation_tokens,
-                maxSequenceLength=int(max_sequence_length),
+                maxSequenceLength=attn_metadata.generation_max_sequence_length,
+                maxInputSequenceLength=attn_metadata.generation_max_input_sequence_length,
+                tokenOffset=0, # Generation or decode tokens come first in the batch.
                 qkv=query,
                 sequenceLengthsDevice=attn_metadata.common_attn_metadata.
                 seq_lens,
                 inputSequenceLengthsDevice=attn_metadata.common_attn_metadata.query_lens,
                 kvCacheBlockOffsets=attn_metadata.common_attn_metadata.
                 block_table_tensor,
-                kvCachePoolPtr=kv_cache.view(torch.int8),
+                kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
-                output=output.view(torch.int8),
+                outputPtr=output.data_ptr(),
                 workspace=attn_metadata.workspace,
                 stream=cuda_stream.cuda_stream,
             )
 
         return output
-
 
 def apply_llama3_scaling(inv_freqs: np.ndarray, rope_scaling_config: dict):
     scale_factor = rope_scaling_config.get("factor", 8.0)

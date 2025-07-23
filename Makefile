@@ -1,4 +1,4 @@
-OUTPUT_PATH ?= /scratch/usr/results_with_full_cuda_graph_reversed_reordering
+OUTPUT_PATH ?= /scratch/usr/aaaaaaaaaaaaaaaaaaaa
 MODEL_PATH ?= /scratch/usr/quantized_model
 DRAFT_MODEL_PATH ?= /scratch/usr/mistral-small-fp8
 TP_SIZE ?= 4

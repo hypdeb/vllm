@@ -56,7 +56,8 @@ class VLLMServerManager:
         env.update(backend_env)
 
         # Prepare command
-        cmd = [
+        nsys_cmd_prefix = ["nsys", "profile", "-o", f"{backend_name.lower()}_{execution_mode}_{cuda_graph_config}_server_no_reordering.nsys-rep", "--trace-fork-before-exec=true", "--cuda-graph-trace=node", "--force-overwrite=true"] if os.getenv("NSYS_PROFILE", "0") == "1" else []
+        cmd = nsys_cmd_prefix + [
             "vllm", "serve", self.model_path, "--host", "0.0.0.0", "--port",
             str(self.port), "--tensor-parallel-size",
             str(self.tp_size), "--quantization", "modelopt",
@@ -305,7 +306,7 @@ class BenchmarkRunner:
             str(input_len), "--random-output-len",
             str(output_len), "--max-concurrency",
             str(concurrency), "--result-filename",
-            str(result_file), "--save-result"
+            str(result_file), "--save-result", "--save-detailed"
         ]
 
         try:
@@ -333,9 +334,9 @@ class BenchmarkRunner:
 
 def generate_test_configurations() -> List[Dict]:
     """Generate test configurations for benchmarking."""
-    concurrency_levels = [1, 4]
-    output_lengths = [100]
-    input_lengths = [32000, 64000]
+    concurrency_levels = [4]
+    output_lengths = [200]
+    input_lengths = [64000]
 
     configs = []
     for concurrency in concurrency_levels:
@@ -502,7 +503,7 @@ def main():
         "--execution-modes",
         nargs="+",
         choices=["eager", "non-eager"],
-        default=["non-eager", "eager"],
+        default=["eager", "non-eager"],
         help="Execution modes to test (default: both eager and non-eager)")
 
     args = parser.parse_args()
@@ -516,7 +517,8 @@ def main():
     backend_configs = {
         "tke": ({
             "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
-            "VLLM_ATTENTION_BACKEND": "TKE"
+            "VLLM_ATTENTION_BACKEND": "TKE",
+            # "CUDA_LAUNCH_BLOCKING": "1",
         }, "TKE"),
         "flash-attn": ({
             "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
