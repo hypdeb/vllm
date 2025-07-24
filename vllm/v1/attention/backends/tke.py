@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -368,6 +369,16 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         context_max_sequence_length = common_attn_metadata.seq_lens_cpu[self._num_generation_sequences:].max().item() if self._num_context_sequences > 0 else 0
         generation_max_sequence_length = common_attn_metadata.seq_lens_cpu[:self._num_generation_sequences].max().item() if self._num_generation_sequences > 0 else 0
         generation_max_input_sequence_length = common_attn_metadata.query_lens_cpu[:self._num_generation_sequences].max().item() if self._num_generation_sequences > 0 else 0
+        
+        if not hasattr(self, '_num_context_sequences'):
+            # If not defined, calculate them from the metadata
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+                common_attn_metadata)
+        else:
+            num_decodes = self._num_generation_sequences
+            num_prefills = self._num_context_sequences
+            num_decode_tokens = self._num_generation_tokens
+            num_prefill_tokens = self._num_context_tokens
 
         return TkeMetadata(
             common_attn_metadata=common_attn_metadata,
@@ -382,10 +393,10 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             sequence_lengths_host=common_attn_metadata.seq_lens_cpu,
             workspace=self.workspace,
             rotary_cos_sin_cache=self.rotary_cos_sin,
-            num_context_sequences=self._num_context_sequences,
-            num_context_tokens=self._num_context_tokens,
-            num_generation_sequences=self._num_generation_sequences,
-            num_generation_tokens=self._num_generation_tokens,
+            num_context_sequences=num_prefills,
+            num_context_tokens=num_prefill_tokens,
+            num_generation_sequences=num_decodes,
+            num_generation_tokens=num_decode_tokens,
         )
 
 
