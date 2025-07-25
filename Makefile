@@ -1,4 +1,4 @@
-OUTPUT_PATH ?= /scratch/usr/aaaaaaaaaaaaaaaaaaaa
+OUTPUT_PATH ?= .
 MODEL_PATH ?= /scratch/usr/quantized_model
 DRAFT_MODEL_PATH ?= /scratch/usr/mistral-small-fp8
 TP_SIZE ?= 4
@@ -152,6 +152,7 @@ vllm-sample-tke: delete-vllm-cache
 	--kv-cache-dtype fp8 \
 	--enforce-eager \
 	--tensor-parallel-size 4 > tke_reorder.txt 2>&1
+	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-tke.nsys-rep > nsys_txt
 
 vllm-sample-flash-attn: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
@@ -161,7 +162,10 @@ vllm-sample-flash-attn: delete-vllm-cache
 	--num-iters 1 \
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
+	--enforce-eager \
+	--enable-metrics \
 	--tensor-parallel-size 4  > flash_attn.txt 2>&1
+	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-flashattn.nsys-rep > nsys_flash_attn.txt
 
 vllm-sample-flash-attn-draft: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \

@@ -11,6 +11,122 @@ import torch
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 
+def print_speculative_decoding_metrics(llm:LLM):
+    """Extract and print speculative decoding acceptance rate metrics"""
+    print("\n" + "="*60)
+    print("SPECULATIVE DECODING METRICS")
+    print("="*60)
+    
+    try:
+        metrics = llm.get_metrics()
+        
+        # Initialize counters
+        num_drafts = 0
+        num_draft_tokens = 0
+        num_accepted_tokens = 0
+        acceptance_counts = [0] * 10  # Support up to 10 speculative tokens
+        
+        # Extract metrics from the metrics list
+        for metric in metrics:
+            if hasattr(metric, 'name') and hasattr(metric, 'value'):
+                if "spec_decode_num_drafts" in metric.name:
+                    num_drafts += metric.value
+                elif "spec_decode_num_draft_tokens" in metric.name:
+                    num_draft_tokens += metric.value
+                elif "spec_decode_num_accepted_tokens" in metric.name and "per_pos" not in metric.name:
+                    num_accepted_tokens += metric.value
+                elif "spec_decode_num_accepted_tokens_per_pos" in metric.name:
+                    # Handle per-position metrics if available
+                    print(metric)
+                    if hasattr(metric, 'values'):
+                        for pos, count in enumerate(metric.values):
+                            if pos < len(acceptance_counts):
+                                acceptance_counts[pos] += count
+        
+        # Calculate and display metrics
+        if num_draft_tokens > 0:
+            acceptance_rate = (num_accepted_tokens / num_draft_tokens) * 100
+            mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
+            
+            print(f"📊 Draft Acceptance Rate: {acceptance_rate:.2f}%")
+            print(f"📏 Mean Acceptance Length: {mean_acceptance_length:.2f} tokens")
+            print(f"✅ Total Accepted Tokens: {num_accepted_tokens:,}")
+            print(f"📝 Total Draft Tokens: {num_draft_tokens:,}")
+            print(f"🎯 Number of Drafts: {num_drafts:,}")
+            
+            # Calculate efficiency
+            efficiency = (num_accepted_tokens / num_draft_tokens) if num_draft_tokens > 0 else 0
+            print(f"⚡ Speculative Efficiency: {efficiency:.3f}")
+            
+            # Per-position acceptance rates
+            print(f"\n📍 Per-Position Acceptance Rates:")
+            for i, count in enumerate(acceptance_counts[:5]):  # Show first 5 positions
+                if num_drafts > 0 and count > 0:
+                    pos_rate = (count / num_drafts) * 100
+                    print(f"   Position {i}: {pos_rate:.1f}%")
+                    
+        else:
+            print("❌ No speculative decoding metrics available")
+            print("   (Check if speculative decoding is enabled and working)")
+            
+    except Exception as e:
+        print(f"⚠️  Error extracting metrics: {e}")
+        print("   Trying alternative method...")
+        
+        # Alternative method: try to access stat loggers directly
+        try:
+            if hasattr(llm.llm_engine, 'stat_loggers'):
+                stat_logger = llm.llm_engine.stat_loggers.get('prometheus')
+                if stat_logger and hasattr(stat_logger, 'spec_decode_metrics'):
+                    metrics = stat_logger.spec_decode_metrics
+                    if metrics:
+                        print(f"📊 Draft Acceptance Rate: {metrics.draft_acceptance_rate:.2f}%")
+                        print(f"⚡ System Efficiency: {metrics.system_efficiency:.3f}")
+                        print(f"✅ Accepted Tokens: {metrics.accepted_tokens:,}")
+                        print(f"📝 Draft Tokens: {metrics.draft_tokens:,}")
+                    else:
+                        print("❌ No metrics available from stat logger")
+                else:
+                    print("❌ Stat logger not available")
+            else:
+                print("❌ No stat loggers found")
+        except Exception as e2:
+            print(f"❌ Alternative method also failed: {e2}")
+    
+    print("="*60)
+
+def monitor_realtime_metrics(llm, interval=2.0, duration=10.0):
+    """Monitor acceptance rate in real-time during generation"""
+    print(f"\n🔄 Real-time monitoring for {duration}s (interval: {interval}s)")
+    
+    try:
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            metrics = llm.get_metrics()
+            
+            num_draft_tokens = 0
+            num_accepted_tokens = 0
+            
+            for metric in metrics:
+                if hasattr(metric, 'name') and hasattr(metric, 'value'):
+                    if "spec_decode_num_draft_tokens" in metric.name:
+                        num_draft_tokens += metric.value
+                    elif "spec_decode_num_accepted_tokens" in metric.name and "per_pos" not in metric.name:
+                        num_accepted_tokens += metric.value
+            
+            if num_draft_tokens > 0:
+                rate = (num_accepted_tokens / num_draft_tokens) * 100
+                print(f"⏱️  Current Acceptance Rate: {rate:.1f}% ({num_accepted_tokens}/{num_draft_tokens})")
+            else:
+                print("⏱️  No speculative tokens yet...")
+                
+            time.sleep(interval)
+            
+    except KeyboardInterrupt:
+        print("\n⏹️  Real-time monitoring stopped by user")
+    except Exception as e:
+        print(f"\n❌ Real-time monitoring error: {e}")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -64,6 +180,12 @@ def parse_args():
                         type=int,
                         required=False,
                         help="Number of speculative tokens")
+    parser.add_argument("--enable-metrics",
+                        action="store_true",
+                        help="Enable speculative decoding metrics collection")
+    parser.add_argument("--realtime-monitoring",
+                        action="store_true", 
+                        help="Enable real-time acceptance rate monitoring")
     return parser.parse_args()
 
 
@@ -95,12 +217,13 @@ def main():
                             f"Warning: Invalid output length in line: {line}")
                         # Treat as regular prompt if parsing fails
                         prompts.append(line)
-                        prompt_configs.append((args.output_len, line))
+                        prompt_configs.append((100, line))  # Default to 100 tokens
                 else:
                     # No comma, treat as regular prompt with default output length
                     prompts.append(line)
-                    prompt_configs.append((args.output_len, line))
+                    prompt_configs.append((100, line))  # Default to 100 tokens
 
+    # prompt_configs.append((1, "a"+prompt_configs[0][1]))
     if not prompts:
         raise ValueError(
             "No prompts provided. Use --prompts or --prompts-file")
@@ -110,6 +233,8 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print(f"Iterations: {args.num_iters}")
     print(f"Warmup iterations: {args.num_iters_warmup}")
+    print(f"Speculative Decoding: N-gram (5 tokens, max 4-gram)")
+    print(f"Metrics Enabled: {args.enable_metrics or args.realtime_monitoring}")
 
     effective_kv_cache_dtype = args.kv_cache_dtype if args.kv_cache_dtype else "auto"
     print(f"Effective kv_cache_dtype: {effective_kv_cache_dtype}")
@@ -140,8 +265,14 @@ def main():
         max_num_seqs=args.batch_size,
         enable_prefix_caching=False,
         enforce_eager=args.enforce_eager,
-        speculative_config=speculative_config)
+        disable_log_stats=False,  # Enable metrics collection
+        speculative_config={
+        "method": "ngram",
+        "num_speculative_tokens": 5,
+        "prompt_lookup_max": 4,
+    })
 
+    
     # Process prompts as a batch with individual sampling parameters
     def process_prompts():
         # Create list of prompts and corresponding sampling parameters
@@ -172,6 +303,17 @@ def main():
     # Benchmark runs
     print("\nBenchmarking...")
     latencies = []
+    
+    # Start real-time monitoring if requested
+    if args.realtime_monitoring:
+        import threading
+        
+        def monitor_background():
+            monitor_realtime_metrics(llm, interval=3.0, duration=args.num_iters * 5)
+        
+        monitor_thread = threading.Thread(target=monitor_background, daemon=True)
+        monitor_thread.start()
+    
     for i in tqdm(range(args.num_iters), desc="Benchmark iterations"):
         start_time = time.perf_counter()
         results = process_prompts()
@@ -189,6 +331,32 @@ def main():
     print(f"\nResults for processing {len(prompts)} prompts:")
     print(f"Average latency: {avg_latency:.4f} seconds")
     print(f"Latency per prompt: {avg_latency / len(prompts):.4f} seconds")
+    
+    # Print speculative decoding metrics
+    if args.enable_metrics or args.realtime_monitoring:
+        print_speculative_decoding_metrics(llm)
+    else:
+        # Always show basic metrics to confirm speculative decoding is working
+        try:
+            metrics = llm.get_metrics()
+            num_draft_tokens = 0
+            num_accepted_tokens = 0
+            
+            for metric in metrics:
+                if hasattr(metric, 'name') and hasattr(metric, 'value'):
+                    if "spec_decode_num_draft_tokens" in metric.name:
+                        num_draft_tokens += metric.value
+                    elif "spec_decode_num_accepted_tokens" in metric.name and "per_pos" not in metric.name:
+                        num_accepted_tokens += metric.value
+            
+            if num_draft_tokens > 0:
+                rate = (num_accepted_tokens / num_draft_tokens) * 100
+                print(f"\n🎯 N-gram Acceptance Rate: {rate:.1f}% ({num_accepted_tokens}/{num_draft_tokens} tokens)")
+            else:
+                print("\n⚠️  No speculative decoding detected (may be normal for short sequences)")
+        except:
+            print("\n⚠️  Could not extract basic metrics")
+    
     print("\nPrompt-Output Pairs:")
 
     # Display results in original order
@@ -208,7 +376,6 @@ def main():
             "model": args.model,
             "num_prompts": len(prompts),
             "batch_size": args.batch_size,
-            "output_len": args.output_len,
             "avg_latency": float(avg_latency),
             "avg_latency_per_prompt": float(avg_latency / len(prompts)),
             "latencies": latencies.tolist(),
