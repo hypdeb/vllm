@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Generate realistic text sequences of varying lengths for testing purposes.
-Produces sequences of 40k+ characters using sample prompts as seeds.
+Generate realistic text sequences of varying token lengths for testing purposes.
+Produces sequences of 40k+ tokens using sample prompts as seeds.
 """
 
 import random
 import re
 from typing import List, Tuple, Optional
 from pathlib import Path
+from transformers import AutoTokenizer
 
 class RealisticTextGenerator:
-    def __init__(self, prompts_file: str = "sample_prompts.txt"):
+    def __init__(self, prompts_file: str = "sample_prompts.txt", tokenizer_path: str = "/trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8"):
         self.prompts = self._load_prompts(prompts_file)
+        
+        # Load the tokenizer
+        print(f"Loading tokenizer from: {tokenizer_path}")
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        print(f"Tokenizer loaded successfully. Vocab size: {len(self.tokenizer)}")
         
         # Common text patterns for realistic expansion
         self.sentence_starters = [
@@ -84,29 +90,34 @@ class RealisticTextGenerator:
             ]
         return prompts
 
-    def _expand_text(self, seed_text: str, target_length: int) -> str:
-        """Expand seed text to reach target length with realistic content."""
+    def _get_token_count(self, text: str) -> int:
+        """Get the token count for the given text."""
+        return len(self.tokenizer.encode(text))
+
+    def _expand_text(self, seed_text: str, target_token_length: int) -> str:
+        """Expand seed text to reach target token length with realistic content."""
         result = seed_text + " "
         
-        while len(result) < target_length:
+        while self._get_token_count(result) < target_token_length:
             # Add transition phrase
-            result += random.choice(self.sentence_starters)
+            addition = random.choice(self.sentence_starters)
             
             # Add filler content
-            result += random.choice(self.filler_content) + " "
+            addition += random.choice(self.filler_content) + " "
             
             # Add some variation with transition phrases
             if random.random() < 0.3:
-                result += f"When {random.choice(self.transition_phrases)}, we observe that "
-                result += random.choice(self.filler_content) + " "
+                addition += f"When {random.choice(self.transition_phrases)}, we observe that "
+                addition += random.choice(self.filler_content) + " "
             
             # Add numbered points occasionally (without newlines)
             if random.random() < 0.15:
-                result += f"{random.randint(1, 10)}. "
-                result += random.choice(self.filler_content) + " "
+                addition += f"{random.randint(1, 10)}. "
+                addition += random.choice(self.filler_content) + " "
             
             # Add some repetition with variation
-            if len(result) > 1000 and random.random() < 0.2:
+            current_token_count = self._get_token_count(result)
+            if current_token_count > 1000 and random.random() < 0.2:
                 # Take a previous sentence and modify it slightly
                 sentences = result.split('. ')
                 if len(sentences) > 3:
@@ -116,15 +127,38 @@ class RealisticTextGenerator:
                         f"Returning to the concept that {base_sentence.lower()}",
                         f"It's worth reiterating that {base_sentence.lower()}"
                     ]
-                    result += random.choice(variations) + ". "
+                    addition += random.choice(variations) + ". "
+            
+            # Check if adding this would exceed our target
+            test_result = result + addition
+            if self._get_token_count(test_result) > target_token_length:
+                # Add words one by one until we reach the target
+                words = addition.split()
+                for word in words:
+                    test_word = result + word + " "
+                    if self._get_token_count(test_word) <= target_token_length:
+                        result = test_word
+                    else:
+                        break
+                break
+            else:
+                result += addition
         
         # Remove any newlines and clean up the text
-        result = result[:target_length]
         result = ' '.join(result.split())  # Remove all newlines and extra spaces
+        
+        # Final token count check and trim if necessary
+        while self._get_token_count(result) > target_token_length:
+            words = result.split()
+            if len(words) > 1:
+                result = ' '.join(words[:-1])
+            else:
+                break
+        
         return result
 
-    def generate_sequence(self, target_length: int, complexity_range: Optional[Tuple[int, int]] = None) -> str:
-        """Generate a single realistic text sequence of specified length."""
+    def generate_sequence(self, target_token_length: int, complexity_range: Optional[Tuple[int, int]] = None) -> str:
+        """Generate a single realistic text sequence of specified token length."""
         if complexity_range:
             min_complexity, max_complexity = complexity_range
             suitable_prompts = [p for p in self.prompts if min_complexity <= p[0] <= max_complexity]
@@ -137,28 +171,30 @@ class RealisticTextGenerator:
         # Select a random prompt as seed
         score, prompt = random.choice(suitable_prompts)
         
-        # Expand the prompt to target length
-        expanded_text = self._expand_text(prompt, target_length)
+        # Expand the prompt to target token length
+        expanded_text = self._expand_text(prompt, target_token_length)
         
         return expanded_text
 
     def generate_multiple_sequences(self, 
                                   count: int, 
-                                  min_length: int = 40000, 
-                                  max_length: int = 100000,
+                                  min_token_length: int = 10000, 
+                                  max_token_length: int = 25000,
                                   complexity_range: Optional[Tuple[int, int]] = None) -> List[str]:
-        """Generate multiple sequences with varying lengths."""
+        """Generate multiple sequences with varying token lengths."""
         sequences = []
         
         for i in range(count):
-            # Random length within the specified range
-            target_length = random.randint(min_length, max_length)
+            # Random token length within the specified range
+            target_token_length = random.randint(min_token_length, max_token_length)
             
             # Generate sequence
-            sequence = self.generate_sequence(target_length, complexity_range)
+            sequence = self.generate_sequence(target_token_length, complexity_range)
+            actual_token_count = self._get_token_count(sequence)
+            
             sequences.append(sequence)
             
-            print(f"Generated sequence {i+1}/{count} - Length: {len(sequence):,} characters")
+            print(f"Generated sequence {i+1}/{count} - Target tokens: {target_token_length:,}, Actual tokens: {actual_token_count:,}, Characters: {len(sequence):,}")
         
         return sequences
 
@@ -173,7 +209,8 @@ class RealisticTextGenerator:
     def save_sequences(self, sequences: List[str], base_filename: str = "sequence"):
         """Save generated sequences to separate files (legacy method)."""
         for i, sequence in enumerate(sequences):
-            filename = f"{base_filename}_{i+1}_{len(sequence)}.txt"
+            token_count = self._get_token_count(sequence)
+            filename = f"{base_filename}_{i+1}_{token_count}tokens.txt"
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(sequence)
             print(f"Saved: {filename}")
@@ -182,23 +219,23 @@ def main():
     """Main function to demonstrate the text generator."""
     generator = RealisticTextGenerator()
     
-    print("Realistic Text Sequence Generator")
-    print("=" * 40)
+    print("Realistic Text Sequence Generator (Token-based)")
+    print("=" * 50)
     
     # Generate sequences with different configurations
-    print("\nGenerating 5 sequences with varying lengths (40k-80k characters)...")
+    print("\nGenerating sequences with varying token lengths ...")
     sequences = generator.generate_multiple_sequences(
         count=1,
-        min_length=200000,
-        max_length=200000
+        min_token_length=64000,
+        max_token_length=64000
     )
     
     # # Generate a few very long sequences
-    # print("\nGenerating 2 very long sequences (80k-150k characters)...")
+    # print("\nGenerating 2 very long sequences (20k-40k tokens)...")
     # long_sequences = generator.generate_multiple_sequences(
     #     count=1,
-    #     min_length=40000,
-    #     max_length=40000,
+    #     min_token_length=20000,
+    #     max_token_length=40000,
     #     complexity_range=(50, 100)  # Higher complexity prompts
     # )
     
@@ -210,9 +247,16 @@ def main():
     print(f"\nSaving all sequences to single file...")
     generator.save_sequences_to_single_file(all_sequences, "generated_sequences.txt")
     
+    # Print statistics
+    total_tokens = sum(generator._get_token_count(s) for s in all_sequences)
+    total_chars = sum(len(s) for s in all_sequences)
+    
     print(f"\nGeneration complete!")
     print(f"Total sequences generated: {len(all_sequences)}")
-    print(f"Total characters generated: {sum(len(s) for s in all_sequences):,}")
+    print(f"Total tokens generated: {total_tokens:,}")
+    print(f"Total characters generated: {total_chars:,}")
+    print(f"Average tokens per sequence: {total_tokens // len(all_sequences):,}")
+    print(f"Average characters per token: {total_chars / total_tokens:.2f}")
     print(f"Sequences saved in sample_prompts.txt format to: generated_sequences.txt")
 
 if __name__ == "__main__":
