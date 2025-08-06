@@ -384,7 +384,7 @@ def main():
             ParallelConfig(tensor_parallel_size=args.tensor_parallel_size)
         }
 
-    if args.num_speculative_tokens and args.prompt_lookup_max and args.draft_model_path:
+    if args.num_speculative_tokens and args.prompt_lookup_max:
         speculative_config = {
             "method": "ngram",
             "num_speculative_tokens": args.num_speculative_tokens,

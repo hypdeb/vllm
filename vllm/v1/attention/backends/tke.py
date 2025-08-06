@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional, List
 import torch
 import numpy as np
 import math
+import os
 
 from vllm.attention.backends.abstract import (
     AttentionBackend,
@@ -18,6 +19,7 @@ from vllm.attention.backends.abstract import (
     InputLayout,
 )
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
@@ -273,7 +275,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             outputScalingFactor=self.output_scaling_factor,
             kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
             multiBlockSemaphores=self.multi_block_semaphores,
-            enableMultiTokenGeneration=False,
+            enableMultiTokenGeneration=True,
             enablePDL=True,  # TODO: remove and default to true internally.
         )
 
@@ -333,7 +335,11 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
         for index_in_batch, request_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            if num_tokens == 1:
+            spec_tokens = scheduler_output.scheduled_spec_decode_tokens.get(request_id, [])
+            num_spec_tokens = len(spec_tokens)
+
+            
+            if num_tokens <= num_spec_tokens+1:
                 decode_indexes.append(index_in_batch)
                 num_decode_tokens += num_tokens
             else:

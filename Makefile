@@ -155,6 +155,19 @@ vllm-sample-tke: delete-vllm-cache
 	--tensor-parallel-size 4 > tke_out.txt 2>&1
 	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-tke.nsys-rep > nsys_txt
 
+
+vllm-sample-flashinfer: delete-vllm-cache
+	$(FLASH_INFER_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	--model /scratch/usr/quantized_model/ \
+	--batch-size 8 \
+	--prompts-file sample_prompts.txt \
+	--num-iters 1 \
+	--num-iters-warmup 0 \
+	--kv-cache-dtype fp8 \
+	--enforce-eager \
+	--enable-specdec-metrics \
+	--tensor-parallel-size 4 > tke_out.txt 2>&1
+	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-tke.nsys-rep > nsys_txt
 vllm-sample-dataset: delete-vllm-cache
 	$(TKE_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
