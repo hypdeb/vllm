@@ -275,7 +275,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             outputScalingFactor=self.output_scaling_factor,
             kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
             multiBlockSemaphores=self.multi_block_semaphores,
-            enableMultiTokenGeneration=True,
+            enableMultiTokenGeneration=vllm_config.speculative_config is not None,
             enablePDL=True,  # TODO: remove and default to true internally.
         )
 
