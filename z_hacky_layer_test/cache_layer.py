@@ -28,9 +28,14 @@ def multiply_1000(tensor):
 def identity(tensor):
     return tensor
 
+def fake_fp8(tensor):
+    return (tensor.to(torch.float8_e4m3fn)).to(torch.bfloat16)
+
 VARIANT_TO_ERROR_FN = {
     "default": identity,
     "multiply_1000": multiply_1000,
+    "fake_fp8": fake_fp8,
+    "true_fp8": identity,
 }
 
 def main():
@@ -61,6 +66,9 @@ def main():
     parser.add_argument(
         "--step-seq-len", type=int, default=10000, help="Step sequence length"
     )
+    parser.add_argument(
+        "--dtype", type=str, default="auto", help="dtype of the model. fp8 for true fp8"
+    )
     args = parser.parse_args()
 
     # Create the output directory name based on the backend
@@ -70,7 +78,10 @@ def main():
     print(f"Loading model: {args.model}")
 
     quantization = "modelopt"
-    kv_cache_dtype = "fp8"
+    if args.dtype == "fp8":
+        kv_cache_dtype = args.dtype
+    else:
+        kv_cache_dtype = "auto"
     # Initialize model
     llm = LLM(
         model=args.model,
@@ -121,6 +132,12 @@ def main():
             print("query dtype:", query.dtype, flush=True)
             print("query:", query.shape, flush=True)
             query = VARIANT_TO_ERROR_FN[args.variant](query)
+            
+            if key is not None:
+                key = VARIANT_TO_ERROR_FN[args.variant](key)
+            if value is not None:
+                value = VARIANT_TO_ERROR_FN[args.variant](value)
+
             # print("key dtype:", key.dtype, flush=True)
             # print("key:", key.shape, flush=True)
             # print("value dtype:", value.dtype, flush=True)
@@ -186,6 +203,7 @@ def main():
             )
 
             print("detached output_tensor:", output_tensor.shape, flush=True)
+            print("detached output_tensor dtype:", output_tensor.dtype, flush=True)
             torch.save(output_tensor.detach().cpu(), f"{pass_dir}/output.pt")
 
             # Save the KV cache *after* forward pass
@@ -226,6 +244,11 @@ def main():
         #     self.registered_hooks = []
         # self.registered_hooks.extend([pre_hook, post_hook])
 
+    def reset_counter(self):
+        global HOOK_COUNTER
+        HOOK_COUNTER[0] = 0
+        print(f"Reset HOOK_COUNTER to 0 in worker process", flush=True)
+
     llm.collective_rpc(attach_hook)
 
     # Generate output with the model to trigger the hook
@@ -238,12 +261,13 @@ def main():
         # Tokenize the book text
     tokenized_book_full = llm.get_tokenizer().encode(book)
     print(f"Book tokenized to {len(tokenized_book_full)} tokens")
-    
+    tokenized_book_full = tokenized_book_full[:100000]
+
     for seq_len in range(args.start_seq_len, args.end_seq_len+1, args.step_seq_len):
-        HOOK_COUNTER[0] = 0
-        print(f"Reset HOOK_COUNTER to 0 for seq_len {seq_len}", flush=True)
+        llm.collective_rpc(reset_counter)
+        print(f"Requested reset of HOOK_COUNTER for seq_len {seq_len}", flush=True)
         # Truncate to a reasonable length if needed
-        tokenized_book = tokenized_book_full[:seq_len]
+        tokenized_book = tokenized_book_full[-seq_len:]
         print(f"Truncated to {len(tokenized_book)} tokens")
         
         detokenized_book = llm.get_tokenizer().decode(tokenized_book)

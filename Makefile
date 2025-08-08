@@ -136,6 +136,12 @@ delete-vllm-cache:
 acc-debug-flashattn:
 	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 > flashattn_out.txt 2>&1
 
+acc-debug-flashattn-fp8:
+	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --dtype fp8 --variant true_fp8 > flashattn_out.txt 2>&1
+
+acc-debug-flashattn-fake-fp8:
+	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --variant fake_fp8 > flashattn_out_fake_fp8.txt 2>&1
+
 acc-debug-tke:
 	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 > tke_out.txt 2>&1
 
@@ -143,11 +149,29 @@ acc-debug-tke-multiply-1000:
 	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --variant multiply_1000 > tke_out_multiply_1000.txt 2>&1
 
 compare-captures:
-	python3 z_hacky_layer_test/compare_captures.py \
-		--captures1 z_hacky_layer_test/captures/TKE/default \
-		--captures2 z_hacky_layer_test/captures/TKE/multiply_1000 \
-		--label1 "Default Run" \
-		--label2 "Multiply 1000 Run"
+	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
+	--captures1 z_hacky_layer_test/captures/TKE/default \
+	--captures2 z_hacky_layer_test/captures/TKE/multiply_1000 \
+	--label1 "Default Run" \
+	--label2 "Multiply 1000 Run" \
+	--tensor-comparison
+
+
+compare-captures2:
+	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
+	--captures1 z_hacky_layer_test/captures/FLASH_ATTN_VLLM_V1/default \
+	--captures2 z_hacky_layer_test/captures/FLASH_ATTN_VLLM_V1/fake_fp8 \
+	--label1 "bf16" \
+	--label2 "fake fp8" \
+	--tensor-comparison
+
+compare-captures3:
+	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
+	--captures1 z_hacky_layer_test/captures/FLASH_ATTN_VLLM_V1/true_fp8 \
+	--captures2 z_hacky_layer_test/captures/FLASH_ATTN_VLLM_V1/fake_fp8 \
+	--label1 "true fp8" \
+	--label2 "fake fp8" \
+	--tensor-comparison
 
 .PHONY: vllm-sample-flashinfer-v1 vllm-sample-tke vllm-sample-flashinfer vllm-sample-dataset vllm-sample-dataset-speculative vllm-sample-flash-attn vllm-sample-flash-attn-draft
 vllm-sample-flashinfer-v1: delete-vllm-cache
