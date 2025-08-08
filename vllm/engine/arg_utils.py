@@ -1572,7 +1572,8 @@ class EngineArgs:
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
-            self.enable_chunked_prefill = True
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = True
             if self.enable_prefix_caching is None:
                 self.enable_prefix_caching = True
         else:
@@ -1727,6 +1728,8 @@ def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
     if recommend_to_remove:
         msg += f"We recommend to remove {feature_name} from your config "
         msg += "in favor of the V1 Engine."
+    import traceback
+    traceback.print_stack()
     logger.warning(msg)
 
 

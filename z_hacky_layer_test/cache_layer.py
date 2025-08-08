@@ -1,166 +1,192 @@
-from typing import Optional
+
 from vllm import LLM
 import argparse
 import torch
 import os
-
+import shutil
 from vllm.sampling_params import SamplingParams
 
+# Set environment variable for insecure serialization
+os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-def load_prompts(prompts_file: str) -> list[str]:
-    pass
+BACKEND_DIR_FORMAT = "z_hacky_layer_test/captures/{output_dir}"
+VARIANT_DIR_FORMAT = BACKEND_DIR_FORMAT + "/{variant}"
 
+SEQLEN_DIR_FORMAT = VARIANT_DIR_FORMAT + "/seq_len_{seq_len}"
+PASS_DIR_FORMAT = SEQLEN_DIR_FORMAT + "/pass_{current_pass_count}"
+
+LOG_PRE_FORWARD_HOOK = False
+LOG_KV_CACHE = False
+
+HOOK_COUNTER = [0]
+
+def multiply_1000(tensor):
+    tensor = tensor * 1000
+    tensor = tensor / 1000
+    return tensor.to(torch.bfloat16)
+
+def identity(tensor):
+    return tensor
+
+VARIANT_TO_ERROR_FN = {
+    "default": identity,
+    "multiply_1000": multiply_1000,
+}
 
 def main():
     parser = argparse.ArgumentParser(description="Extract first LlamaAttention layer")
     parser.add_argument(
         "--model",
         type=str,
-        default="meta-llama/Llama-3.1-8B",
+        required=True,
         help="Model name or path",
     )
+
     parser.add_argument(
-        "--trust-remote-code", action="store_true", help="Whether to trust remote code"
-    )
-    parser.add_argument(
-        "--backend",
-        type=str,
-        choices=[
-            "FLASH_ATTN",
-            "FLASH_ATTN_VLLM_V1",
-            "FLASHINFER",
-            "TKE",
-        ],
-        default="FLASHINFER",
-        help="vLLM attention backend to use",
-    )
-    parser.add_argument(
-        "--max-tokens", type=int, default=2, help="Maximum number of tokens to generate"
+        "--max-tokens", type=int, default=1, help="Maximum number of tokens to generate"
     )
     parser.add_argument(
         "--enforce-eager", action="store_true", help="Enforce eager execution"
     )
+    parser.add_argument(
+        "--variant", type=str, default="default", help="variant of inference, eg `downcast` to downcast to fp8 before op"
+    )
+
+    parser.add_argument(
+        "--start-seq-len", type=int, default=4000, help="Start sequence length"
+    )
+    parser.add_argument(
+        "--end-seq-len", type=int, default=64000, help="End sequence length"
+    )
+    parser.add_argument(
+        "--step-seq-len", type=int, default=10000, help="Step sequence length"
+    )
     args = parser.parse_args()
 
-    # Set the environment variable for the backend
-    os.environ["VLLM_ATTENTION_BACKEND"] = args.backend
-
     # Create the output directory name based on the backend
-    output_dir = f"{args.backend}_attn_captures"
+    backend = os.environ['VLLM_ATTENTION_BACKEND']
 
     # Instantiate a normal vLLM engine
     print(f"Loading model: {args.model}")
 
-    if "FP8" in args.model:
-        quantization = "modelopt"
-        kv_cache_dtype = "fp8"
-    else:
-        quantization = None
-        kv_cache_dtype = "auto"
+    quantization = "modelopt"
+    kv_cache_dtype = "fp8"
     # Initialize model
     llm = LLM(
         model=args.model,
         enforce_eager=args.enforce_eager,
         trust_remote_code=True,
-        gpu_memory_utilization=0.3,
+        gpu_memory_utilization=0.9,
         quantization=quantization,
         kv_cache_dtype=kv_cache_dtype,
+        max_model_len=131072,
+        enable_prefix_caching=False,
+        tensor_parallel_size=1,
         block_size=32,
+        enable_chunked_prefill=False,
     )
 
-    prompts = ["Hello, how are you?"]
+    with open("pg2600.txt", "r") as file:
+        book = file.read()
+
+    variant_dir = VARIANT_DIR_FORMAT.format(output_dir=backend,variant=args.variant)
+    if os.path.isdir(variant_dir) and not os.path.islink(variant_dir):
+        shutil.rmtree(variant_dir)
+    elif os.path.exists(variant_dir):
+        os.remove(variant_dir)
 
     def attach_hook(self):
         # print("self.model_runner.model.model.__class__", self.model_runner.model.model.__class__)
         # print("self.model_runner.model.model.layers", self.model_runner.model.model.layers)
         layer = self.model_runner.model.model.layers[0]
+        attn_layer: torch.nn.Module = layer.self_attn.attn
         # print("layer:", layer)
         # print("layer.self_attn:", layer.self_attn)
         # print("layer.self_attn.attn:", layer.self_attn.attn)
 
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
 
         # Counter to keep track of forward passes
-        hook_counter = [0]
 
-        def pre_forward_hook(module, args):
-            hook_counter[0] += 1
-            current_pass_count = hook_counter[0]
+
+        def pre_forward_hook(module, input_args):
+            global HOOK_COUNTER
+            current_pass_count = HOOK_COUNTER[0]
             print(
                 f"Pre-forward hook for pass {current_pass_count}, saving pre-execution tensors.",
                 flush=True,
             )
 
-            query, key, value = args[0], args[1], args[2]
+            query, key, value = input_args[0], input_args[1], input_args[2]
+            
+            print("query dtype:", query.dtype, flush=True)
+            print("query:", query.shape, flush=True)
+            query = VARIANT_TO_ERROR_FN[args.variant](query)
+            # print("key dtype:", key.dtype, flush=True)
+            # print("key:", key.shape, flush=True)
+            # print("value dtype:", value.dtype, flush=True)
+            # print("value:", value.shape, flush=True)
+            # # Get the forward context and kv_cache
+            # from vllm.forward_context import get_forward_context
 
-            # Get the forward context and kv_cache
-            from vllm.forward_context import get_forward_context
+            # forward_context = get_forward_context()
+            # kv_cache_pre = module.kv_cache[forward_context.virtual_engine]
 
-            forward_context = get_forward_context()
-            kv_cache_pre = module.kv_cache[forward_context.virtual_engine]
 
-            # Create subdirectory for this forward pass
-            pass_dir = f"{output_dir}/pass_{current_pass_count}"
-            os.makedirs(pass_dir, exist_ok=True)
+            # # Save tensors to files using torch.save
+            # if query is not None and LOG_PRE_FORWARD_HOOK:
+            #     print("query:", query.shape, flush=True)
+            #     torch.save(query.detach().cpu(), f"{pass_dir}/query.pt")
 
-            # Save tensors to files using torch.save
-            if query is not None:
-                torch.save(query.detach().cpu(), f"{pass_dir}/query.pt")
+            # if key is not None and LOG_PRE_FORWARD_HOOK:
+            #     print("key:", key.shape, flush=True)
+            #     torch.save(key.detach().cpu(), f"{pass_dir}/key.pt")
+            # else:
+            #     torch.save(None, f"{pass_dir}/key.pt")
 
-            if key is not None:
-                torch.save(key.detach().cpu(), f"{pass_dir}/key.pt")
-            else:
-                torch.save(None, f"{pass_dir}/key.pt")
+            # if value is not None and LOG_PRE_FORWARD_HOOK:
+            #     print("value:", value.shape, flush=True)
+            #     torch.save(value.detach().cpu(), f"{pass_dir}/value.pt")
+            # else:
+            #     torch.save(None, f"{pass_dir}/value.pt")
 
-            if value is not None:
-                torch.save(value.detach().cpu(), f"{pass_dir}/value.pt")
-            else:
-                torch.save(None, f"{pass_dir}/value.pt")
+            # # Save the KV cache *before* forward
+            # if isinstance(kv_cache_pre, (list, tuple)) and LOG_PRE_FORWARD_HOOK:
+            #     print("kv_cache_pre:", len(kv_cache_pre), flush=True)
+            #     torch.save(len(kv_cache_pre), f"{pass_dir}/kv_cache_pre_list_len.pt")
+            #     kv_cache_pre_cpu = []
+            #     for tensor_item in kv_cache_pre:
+            #         if hasattr(tensor_item, "detach"):
+            #             kv_cache_pre_cpu.append(tensor_item.detach().cpu())
+            #         else:
+            #             kv_cache_pre_cpu.append(tensor_item)
+            #     torch.save(kv_cache_pre_cpu, f"{pass_dir}/kv_cache_pre.pt")
+            # else:
+            #     if hasattr(kv_cache_pre, "detach"):
+            #         torch.save(
+            #             kv_cache_pre.detach().cpu(), f"{pass_dir}/kv_cache_pre.pt"
+            #         )
+            #     else:
+            #         torch.save(kv_cache_pre, f"{pass_dir}/kv_cache_pre.pt")
 
-            # Save the KV cache *before* forward
-            if isinstance(kv_cache_pre, (list, tuple)):
-                torch.save(len(kv_cache_pre), f"{pass_dir}/kv_cache_pre_list_len.pt")
-                kv_cache_pre_cpu = []
-                for tensor_item in kv_cache_pre:
-                    if hasattr(tensor_item, "detach"):
-                        kv_cache_pre_cpu.append(tensor_item.detach().cpu())
-                    else:
-                        kv_cache_pre_cpu.append(tensor_item)
-                torch.save(kv_cache_pre_cpu, f"{pass_dir}/kv_cache_pre.pt")
-            else:
-                if hasattr(kv_cache_pre, "detach"):
-                    torch.save(
-                        kv_cache_pre.detach().cpu(), f"{pass_dir}/kv_cache_pre.pt"
-                    )
-                else:
-                    torch.save(kv_cache_pre, f"{pass_dir}/kv_cache_pre.pt")
+            # # Also save the forward context's virtual engine
+            # torch.save(forward_context.virtual_engine, f"{pass_dir}/virtual_engine.pt")
 
-            # Also save the forward context's virtual engine
-            torch.save(forward_context.virtual_engine, f"{pass_dir}/virtual_engine.pt")
-
-            return args
+            return (query, key, value)
 
         def post_forward_hook(module, args_input, output_tensor):
+            global HOOK_COUNTER
             # hook_counter[0] was already incremented by the pre_forward_hook for this pass
-            current_pass_count = hook_counter[0]
+            pass_dir = PASS_DIR_FORMAT.format(output_dir=backend,variant=args.variant, current_pass_count=HOOK_COUNTER[0], seq_len=output_tensor.shape[0])
+            os.makedirs(pass_dir, exist_ok=True)
+
+            current_pass_count = HOOK_COUNTER[0]
             print(
                 f"Post-forward hook for pass {current_pass_count}, saving post-execution tensors.",
                 flush=True,
             )
 
-            pass_dir = f"{output_dir}/pass_{current_pass_count}"
-            # Directory should have been created by pre_forward_hook
-
-            # Save the output tensor
-            if output_tensor is not None:
-                # Assuming output_tensor is a single tensor as per Attention layer's forward method
-                if hasattr(output_tensor, "detach"):
-                    torch.save(output_tensor.detach().cpu(), f"{pass_dir}/output.pt")
-                else:
-                    torch.save(output_tensor, f"{pass_dir}/output.pt")
-            else:
-                torch.save(None, f"{pass_dir}/output.pt")
+            print("detached output_tensor:", output_tensor.shape, flush=True)
+            torch.save(output_tensor.detach().cpu(), f"{pass_dir}/output.pt")
 
             # Save the KV cache *after* forward pass
             from vllm.forward_context import get_forward_context
@@ -168,7 +194,8 @@ def main():
             forward_context = get_forward_context()
             kv_cache_post = module.kv_cache[forward_context.virtual_engine]
 
-            if isinstance(kv_cache_post, (list, tuple)):
+            if isinstance(kv_cache_post, (list, tuple)) and LOG_KV_CACHE:
+                print("kv_cache_post:", len(kv_cache_post), flush=True)
                 torch.save(len(kv_cache_post), f"{pass_dir}/kv_cache_post_list_len.pt")
                 kv_cache_post_cpu = []
                 for tensor_item in kv_cache_post:
@@ -185,8 +212,9 @@ def main():
                 else:
                     torch.save(kv_cache_post, f"{pass_dir}/kv_cache_post.pt")
 
+            HOOK_COUNTER[0] += 1
+
         # Register the pre-forward and post-forward hooks
-        attn_layer: torch.nn.Module = layer.self_attn.attn
         pre_hook = attn_layer.register_forward_pre_hook(pre_forward_hook)
         post_hook = attn_layer.register_forward_hook(post_forward_hook)
 
@@ -201,13 +229,26 @@ def main():
     llm.collective_rpc(attach_hook)
 
     # Generate output with the model to trigger the hook
+
     sampling_params = SamplingParams(
         max_tokens=args.max_tokens,
         temperature=0.0,
         top_k=1,
     )
-    output = llm.generate(prompts, sampling_params)
-    print("Output:", output, flush=True)
+        # Tokenize the book text
+    tokenized_book_full = llm.get_tokenizer().encode(book)
+    print(f"Book tokenized to {len(tokenized_book_full)} tokens")
+    
+    for seq_len in range(args.start_seq_len, args.end_seq_len+1, args.step_seq_len):
+        HOOK_COUNTER[0] = 0
+        print(f"Reset HOOK_COUNTER to 0 for seq_len {seq_len}", flush=True)
+        # Truncate to a reasonable length if needed
+        tokenized_book = tokenized_book_full[:seq_len]
+        print(f"Truncated to {len(tokenized_book)} tokens")
+        
+        detokenized_book = llm.get_tokenizer().decode(tokenized_book)
+        output = llm.generate(detokenized_book, sampling_params)
+        print("Input:", output[0].prompt[-100:], f"\noutput: {output[0].outputs[0].text}", flush=True)
 
     # print("ret:", ret)
 

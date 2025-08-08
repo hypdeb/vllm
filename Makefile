@@ -133,6 +133,23 @@ delete-vllm-cache:
 ######################## Samples ##########################################################
 ###########################################################################################
 
+acc-debug-flashattn:
+	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 > flashattn_out.txt 2>&1
+
+acc-debug-tke:
+	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 > tke_out.txt 2>&1
+
+acc-debug-tke-multiply-1000:
+	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --variant multiply_1000 > tke_out_multiply_1000.txt 2>&1
+
+compare-captures:
+	python3 z_hacky_layer_test/compare_captures.py \
+		--captures1 z_hacky_layer_test/captures/TKE/default \
+		--captures2 z_hacky_layer_test/captures/TKE/multiply_1000 \
+		--label1 "Default Run" \
+		--label2 "Multiply 1000 Run"
+
+.PHONY: vllm-sample-flashinfer-v1 vllm-sample-tke vllm-sample-flashinfer vllm-sample-dataset vllm-sample-dataset-speculative vllm-sample-flash-attn vllm-sample-flash-attn-draft
 vllm-sample-flashinfer-v1: delete-vllm-cache
 	$(FLASH_INFER_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
@@ -152,7 +169,9 @@ vllm-sample-tke: delete-vllm-cache
 	--kv-cache-dtype fp8 \
 	--enforce-eager \
 	--enable-specdec-metrics \
-	--tensor-parallel-size 4 > tke_out.txt 2>&1
+	--num-speculative-tokens 7 \
+	--prompt-lookup-max 3 \
+	--tensor-parallel-size 4 > tke_out_spec.txt 2>&1
 	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-tke.nsys-rep > nsys_txt
 
 
