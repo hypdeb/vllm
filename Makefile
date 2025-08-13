@@ -1,4 +1,4 @@
-OUTPUT_PATH ?= /scratch/usr/aaaaaaaaaaaaaaaaaaaa
+OUTPUT_PATH ?= .
 MODEL_PATH ?= /scratch/usr/quantized_model
 DRAFT_MODEL_PATH ?= /scratch/usr/mistral-small-fp8
 TP_SIZE ?= 4
@@ -151,7 +151,52 @@ vllm-sample-tke: delete-vllm-cache
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
 	--enforce-eager \
-	--tensor-parallel-size 4 > tke_reorder.txt 2>&1
+	--enable-specdec-metrics \
+	--tensor-parallel-size 4 > tke_out.txt 2>&1
+	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-tke.nsys-rep > nsys_txt
+
+
+vllm-sample-flashinfer: delete-vllm-cache
+	$(FLASH_INFER_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	--model /scratch/usr/quantized_model/ \
+	--batch-size 8 \
+	--prompts-file sample_prompts.txt \
+	--num-iters 1 \
+	--num-iters-warmup 0 \
+	--kv-cache-dtype fp8 \
+	--enforce-eager \
+	--enable-specdec-metrics \
+	--tensor-parallel-size 4 > tke_out.txt 2>&1
+	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-tke.nsys-rep > nsys_txt
+vllm-sample-dataset: delete-vllm-cache
+	$(TKE_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	--model /scratch/usr/quantized_model/ \
+	--batch-size 8 \
+	--prompts-file dataset_preprocessed.txt \
+	--max-samples 50 \
+	--num-iters 1 \
+	--num-iters-warmup 0 \
+	--kv-cache-dtype fp8 \
+	--enforce-eager \
+	--output-json nonspeculative_dataset_output_v2.json \
+	--tensor-parallel-size 4 > tke_nonspeculative_out_v2.txt 2>&1
+
+vllm-sample-dataset-speculative: delete-vllm-cache
+	$(TKE_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	--model /scratch/usr/quantized_model/ \
+	--batch-size 8 \
+	--dataset-path /scratch/usr/AA_dataset.txt \
+	--max-samples 50 \
+	--num-iters 1 \
+	--num-iters-warmup 0 \
+	--kv-cache-dtype fp8 \
+	--enforce-eager \
+	--enable-specdec-metrics \
+	--num-speculative-tokens 7 \
+	--prompt-lookup-max 3 \
+	--output-json speculative_dataset_output.json \
+	--save-preprocessed dataset_preprocessed.txt \
+	--tensor-parallel-size 4 > tke_speculative_out.txt 2>&1
 
 vllm-sample-flash-attn: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
@@ -161,7 +206,10 @@ vllm-sample-flash-attn: delete-vllm-cache
 	--num-iters 1 \
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
+	--enforce-eager \
+	--enable-specdec-metrics \
 	--tensor-parallel-size 4  > flash_attn.txt 2>&1
+	# nsys stats --force-export=true --timeunit milliseconds  vllm-sample-profile-flashattn.nsys-rep > nsys_flash_attn.txt
 
 vllm-sample-flash-attn-draft: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
@@ -191,6 +239,19 @@ install-lm-eval:
 	pip install -e .
 
 # Small accuracy tests
+serve_tke:
+	$(TKE_FLAGS) vllm serve $(MODEL_PATH) --tensor-parallel-size $(TP_SIZE) --quantization modelopt --gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager --no-enable-prefix-caching --speculative-config '{"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}'
+
+serve_flashinfer:
+	$(FLASH_INFER_FLAGS) vllm serve $(MODEL_PATH) --tensor-parallel-size $(TP_SIZE) --quantization modelopt --gpu-memory-utilization 0.95 --enforce-eager --no-enable-prefix-caching --speculative-config '{"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}'
+
+query:
+	curl http://localhost:8000/v1/completions \
+	    -H "Content-Type: application/json" \
+	    -d '{"model": "/scratch/usr/quantized_model", "prompt": "What is the capital of France?", "max_tokens": 15, "temperature": 0}'
+
+	echo
+
 
 lm-eval-tiny-hellaswag-tke: delete-vllm-cache
 	$(TKE_FLAGS) lm_eval \
@@ -198,7 +259,7 @@ lm-eval-tiny-hellaswag-tke: delete-vllm-cache
 		--tasks tinyHellaswag \
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
-		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
 
 lm-eval-tiny-hellaswag-flash-attn: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) lm_eval \
@@ -234,7 +295,7 @@ lm-eval-hellaswag-tke: delete-vllm-cache
 		--tasks hellaswag \
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-hellaswag-tke.json \
-		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
 
 lm-eval-GSM8k-tke: delete-vllm-cache
 	$(TKE_FLAGS) lm_eval \
@@ -242,7 +303,7 @@ lm-eval-GSM8k-tke: delete-vllm-cache
 		--tasks GSM8k \
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-GSM8k-tke.json \
-		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
 
 lm-eval-hellaswag-flash-attn: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) lm_eval \
@@ -250,7 +311,7 @@ lm-eval-hellaswag-flash-attn: delete-vllm-cache
 		--tasks hellaswag \
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-hellaswag-flash-attn.json \
-		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
 
 lm-eval-GSM8k-flash-attn: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) lm_eval \
@@ -258,7 +319,7 @@ lm-eval-GSM8k-flash-attn: delete-vllm-cache
 		--tasks GSM8k \
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-GSM8k-flash-attn.json \
-		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
 
 big-accuracy-tests: lm-eval-hellaswag-tke lm-eval-GSM8k-tke lm-eval-hellaswag-flash-attn lm-eval-GSM8k-flash-attn
 
