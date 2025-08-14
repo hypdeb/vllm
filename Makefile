@@ -145,15 +145,18 @@ acc-debug-flashattn-fake-fp8:
 acc-debug-tke:
 	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 > tke_out.txt 2>&1
 
+acc-debug-tke-fp8:
+	USE_FP8=1 $(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --dtype fp8 --variant true_fp8 > tke_out_fp8.txt 2>&1
+
 acc-debug-tke-multiply-1000:
 	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --variant multiply_1000 > tke_out_multiply_1000.txt 2>&1
 
 compare-captures:
 	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
 	--captures1 z_hacky_layer_test/captures/TKE/default \
-	--captures2 z_hacky_layer_test/captures/TKE/multiply_1000 \
-	--label1 "Default Run" \
-	--label2 "Multiply 1000 Run" \
+	--captures2 z_hacky_layer_test/captures/TKE/true_fp8 \
+	--label1 "TKE_Run" \
+	--label2 "TKE_FP8_Run" \
 	--tensor-comparison
 
 
