@@ -134,22 +134,23 @@ delete-vllm-cache:
 ###########################################################################################
 
 acc-debug-flashattn:
-	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 > flashattn_out.txt 2>&1
+	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model $(MODEL_PATH) > flashattn_out.txt 2>&1
 
 acc-debug-flashattn-fp8:
-	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --dtype fp8 --variant true_fp8 > flashattn_out.txt 2>&1
+	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model $(MODEL_PATH) --dtype fp8 --variant true_fp8 > flashattn_out_true_fp8.txt 2>&1
 
 acc-debug-flashattn-fake-fp8:
-	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --variant fake_fp8 > flashattn_out_fake_fp8.txt 2>&1
+	$(FLASH_ATTN_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model $(MODEL_PATH) --variant fake_fp8 > flashattn_out_fake_fp8.txt 2>&1
 
 acc-debug-tke:
-	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 > tke_out.txt 2>&1
+	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model $(MODEL_PATH) > tke_out.txt 2>&1
 
 acc-debug-tke-fp8:
-	USE_FP8=1 $(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --dtype fp8 --variant true_fp8 > tke_out_fp8.txt 2>&1
+	USE_FP8=1 $(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model $(MODEL_PATH) --dtype fp8 --variant true_fp8 > tke_out_fp8.txt 2>&1
 
-acc-debug-tke-multiply-1000:
-	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model /trt_llm_data/llm-models/llama-3.1-model/Llama-3.1-8B-Instruct-FP8 --variant multiply_1000 > tke_out_multiply_1000.txt 2>&1
+acc-debug-tke-fake-fp8:
+	$(TKE_FLAGS) python z_hacky_layer_test/cache_layer.py --enforce-eager --model $(MODEL_PATH) --variant fake_fp8 > tke_out_fake_fp8.txt 2>&1
+
 
 compare-captures:
 	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
@@ -159,6 +160,21 @@ compare-captures:
 	--label2 "TKE_FP8_Run" \
 	--tensor-comparison
 
+compare-captures-tke-fake-fp8:
+	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
+	--captures1 z_hacky_layer_test/captures/TKE/fake_fp8 \
+	--captures2 z_hacky_layer_test/captures/TKE/true_fp8 \
+	--label1 "TKE_Fake_FP8_Run" \
+	--label2 "TKE_True_FP8_Run" \
+	--tensor-comparison
+
+compare-captures-bf16-fake-fp8:
+	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
+	--captures1 z_hacky_layer_test/captures/TKE/default \
+	--captures2 z_hacky_layer_test/captures/TKE/fake_fp8 \
+	--label1 "TKE_BF16_Run" \
+	--label2 "TKE_Fake_FP8_Run" \
+	--tensor-comparison
 
 compare-captures2:
 	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
