@@ -58,13 +58,13 @@ def main():
     )
 
     parser.add_argument(
-        "--start-seq-len", type=int, default=4000, help="Start sequence length"
+        "--start-seq-len", type=int, default=2000, help="Start sequence length"
     )
     parser.add_argument(
-        "--end-seq-len", type=int, default=64000, help="End sequence length"
+        "--end-seq-len", type=int, default=128000, help="End sequence length"
     )
     parser.add_argument(
-        "--step-seq-len", type=int, default=10000, help="Step sequence length"
+        "--step-seq-len", type=int, default=1000, help="Step sequence length"
     )
     parser.add_argument(
         "--dtype", type=str, default="auto", help="dtype of the model. fp8 for true fp8"
@@ -92,12 +92,12 @@ def main():
         kv_cache_dtype=kv_cache_dtype,
         max_model_len=131072,
         enable_prefix_caching=False,
-        tensor_parallel_size=1,
+        tensor_parallel_size=4,
         block_size=32,
         enable_chunked_prefill=False,
     )
 
-    with open("pg2600.txt", "r") as file:
+    with open("/scratch/usr/michelangelo.txt", "r") as file:
         book = file.read()
 
     variant_dir = VARIANT_DIR_FORMAT.format(output_dir=backend,variant=args.variant)
@@ -107,8 +107,9 @@ def main():
         os.remove(variant_dir)
 
     def attach_hook(self):
-        # print("self.model_runner.model.model.__class__", self.model_runner.model.model.__class__)
-        # print("self.model_runner.model.model.layers", self.model_runner.model.model.layers)
+        print("self.model_runner.model.model.__class__", self.model_runner.model.model.__class__)
+        print("self.model_runner.model.model.layers", self.model_runner.model.model.layers)
+        print("self.model_runner.model.model.layers[0]", self.model_runner.model.model.layers[0])
         layer = self.model_runner.model.model.layers[0]
         attn_layer: torch.nn.Module = layer.self_attn.attn
         # print("layer:", layer)
@@ -261,13 +262,13 @@ def main():
         # Tokenize the book text
     tokenized_book_full = llm.get_tokenizer().encode(book)
     print(f"Book tokenized to {len(tokenized_book_full)} tokens")
-    tokenized_book_full = tokenized_book_full[:100000]
 
     for seq_len in range(args.start_seq_len, args.end_seq_len+1, args.step_seq_len):
         llm.collective_rpc(reset_counter)
         print(f"Requested reset of HOOK_COUNTER for seq_len {seq_len}", flush=True)
+        
         # Truncate to a reasonable length if needed
-        tokenized_book = tokenized_book_full[-seq_len:]
+        tokenized_book = tokenized_book_full[:seq_len]
         print(f"Truncated to {len(tokenized_book)} tokens")
         
         detokenized_book = llm.get_tokenizer().decode(tokenized_book)

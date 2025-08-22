@@ -265,7 +265,7 @@ def compute_l2_difference(tensor1, tensor2):
         
         diff = tensor1- tensor2
         l2_norm = torch.norm(diff, p=2).item()
-        return l2_norm / (tensor1.shape[0]**(0.5))
+        return torch.sqrt(torch.mean(diff.float() ** 2)).item()
     except Exception as e:
         print(f"Error computing L2 difference: {e}")
         return float('nan')

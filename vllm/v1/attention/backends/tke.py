@@ -59,6 +59,7 @@ rope_scaling_type_mapping = {
     "llama3": RotaryScalingType.LLAMA3,
 }
 
+USE_FP8 = os.environ.get("USE_FP8", "0") == "1"
 
 class TkeAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -101,7 +102,7 @@ class TkeAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_output_dtype() -> torch.dtype:
-        return torch.float8_e4m3fn
+        return torch.float8_e4m3fn if USE_FP8 else torch.bfloat16
 
     @staticmethod
     def get_input_layout() -> InputLayout:
@@ -193,7 +194,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
         # TODO: instead of hardcoding it, get it from configuration, check that it is FP8,
         # and throw otherwise as long as we only support FP8.
-        prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3
+        prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3 if USE_FP8 else DeviceDataType.BF16
 
         prefix_cache_configuration.numTokensPerBlock = kv_cache_spec.block_size
         prefix_cache_configuration.maxNumBlocksPerSequence = vllm_config.model_config.max_model_len // kv_cache_spec.block_size
@@ -264,7 +265,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
             inputDataType=DeviceDataType.BF16,
-            outputDataType=DeviceDataType.FP8_E4M3,
+            outputDataType=DeviceDataType.FP8_E4M3 if USE_FP8 else DeviceDataType.BF16,
             attentionLayerDimensions=self.attention_layer_dimensions,
             rotaryEmbedding=rotary_positional_embedding,
             prefixCacheConfiguration=prefix_cache_configuration,

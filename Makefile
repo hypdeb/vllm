@@ -192,6 +192,14 @@ compare-captures3:
 	--label2 "fake fp8" \
 	--tensor-comparison
 
+compare-captures4:
+	MPLCONFIGDIR=/tmp python3 z_hacky_layer_test/compare_captures.py \
+	--captures1 z_hacky_layer_test/captures/FLASH_ATTN_VLLM_V1/default \
+	--captures2 z_hacky_layer_test/captures/FLASH_ATTN_VLLM_V1/true_fp8 \
+	--label1 "bf16" \
+	--label2 "true fp8" \
+	--tensor-comparison
+
 .PHONY: vllm-sample-flashinfer-v1 vllm-sample-tke vllm-sample-flashinfer vllm-sample-dataset vllm-sample-dataset-speculative vllm-sample-flash-attn vllm-sample-flash-attn-draft
 vllm-sample-flashinfer-v1: delete-vllm-cache
 	$(FLASH_INFER_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
