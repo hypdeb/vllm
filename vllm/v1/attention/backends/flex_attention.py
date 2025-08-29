@@ -15,8 +15,8 @@ from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
+                                              InputLayout,
                                               is_quantized_kv_cache)
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
@@ -97,6 +97,18 @@ class FlexAttentionBackend(AttentionBackend):
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
+        return False
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
         return False
 
 

@@ -47,9 +47,10 @@ def create_common_attn_metadata(
     query_start_loc = torch.zeros(batch_spec.batch_size + 1,
                                   dtype=torch.int32,
                                   device=device)
-    query_start_loc[1:] = torch.tensor(batch_spec.query_lens,
+    query_lens = torch.tensor(batch_spec.query_lens,
                                        dtype=torch.int32,
-                                       device=device).cumsum(0)
+                                       device=device)
+    query_start_loc[1:] = query_lens.cumsum(0)
     query_start_loc_cpu = query_start_loc.cpu()
     num_tokens = batch_spec.compute_num_tokens()
 
@@ -98,6 +99,8 @@ def create_common_attn_metadata(
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens_cpu,
+        query_lens=query_lens,
+        query_lens_cpu=query_lens.cpu(),
         num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
@@ -141,6 +144,8 @@ def get_attention_backend(backend_name: _Backend):
         "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
         _Backend.TRITON_MLA_VLLM_V1:
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+        _Backend.TKE:
+        "vllm.v1.attention.backends.tke.TkeAttentionBackend",
     }
 
     if backend_name not in backend_map:
