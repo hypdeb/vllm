@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType, InputLayout)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform

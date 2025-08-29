@@ -10,7 +10,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType,
+                                              InputLayout)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -185,6 +186,18 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
         return TritonAttentionMetadataBuilder
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 
 @cache

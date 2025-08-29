@@ -7,7 +7,8 @@ from typing import Optional
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
+                                              AttentionLayer, AttentionType,
+                                              InputLayout)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -157,6 +158,18 @@ class PallasAttentionBackend(AttentionBackend):
         if page_size >= 256:
             return 256
         return page_size
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 
 @dataclass

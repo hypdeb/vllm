@@ -589,6 +589,10 @@ def get_requirements() -> list[str]:
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
+        # Add direct dependency on TKE project for CUDA builds
+        requirements.append(
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git"
+        )
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
@@ -697,6 +701,9 @@ setup(
         "flashinfer": ["flashinfer-python==0.2.14.post1"],
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
+        "tke": [
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git"
+        ]
     },
     cmdclass=cmdclass,
     package_data=package_data,

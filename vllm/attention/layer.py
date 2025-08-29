@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.attention import AttentionType
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, InputLayout
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -239,32 +239,53 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+        q_dimension = self.head_size * self.num_heads
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+
+        forward_context: ForwardContext = get_forward_context()
+        kv_cache_dtype = self.kv_cache[forward_context.virtual_engine].dtype
         if self.use_output:
-            output_shape = (output_shape
-                            if output_shape is not None else query.shape)
-            output = torch.zeros(output_shape,
-                                 dtype=query.dtype,
-                                 device=query.device)
-            hidden_size = output_shape[-1]
-            # We skip reshaping query, key and value tensors for the MLA
-            # backend since these tensors have different semantics and are
-            # processed differently.
-            if not self.use_mla:
-                # Reshape the query, key, and value tensors.
-                # NOTE(woosuk): We do this outside the custom op to minimize the
-                # CPU overheads from the non-CUDA-graph regions.
-                query = query.view(-1, self.num_heads, self.head_size)
-                output = output.view(-1, self.num_heads, self.head_size)
-                if key is not None:
-                    key = key.view(-1, self.num_kv_heads, self.head_size)
-                if value is not None:
-                    value = value.view(-1, self.num_kv_heads, self.head_size)
+            output_shape: torch.Size | tuple[int, int]
+            if self.attn_backend.get_input_layout() == InputLayout.SPLIT_QKV:
+                output_shape = (output_shape
+                                if output_shape is not None else query.shape)
+                output = torch.zeros(
+                    output_shape,
+                    dtype=self.attn_backend.get_output_dtype(kv_cache_dtype),
+                    device=query.device)
+                # We skip reshaping query, key and value tensors for the MLA
+                # backend since these tensors have different semantics and are
+                # processed differently.
+                if not self.use_mla:
+                    # Reshape the query, key, and value tensors.
+                    # NOTE(woosuk): We do this outside the custom op to minimize the
+                    # CPU overheads from the non-CUDA-graph regions.
+                    query = query.view(-1, self.num_heads, self.head_size)
+                    output = output.view(-1, self.num_heads, self.head_size)
+                    if key is not None:
+                        key = key.view(-1, self.num_kv_heads, self.head_size)
+                    if value is not None:
+                        value = value.view(-1, self.num_kv_heads,
+                                           self.head_size)
+            elif self.attn_backend.get_input_layout(
+            ) == InputLayout.CONTIGUOUS_QKV:
+                output_shape = (output_shape if output_shape is not None else
+                                (query.shape[0], q_dimension))
+                output = torch.zeros(
+                    output_shape,
+                    dtype=self.attn_backend.get_output_dtype(kv_cache_dtype),
+                    device=query.device)
+                key = None  # type: ignore
+                value = None  # type: ignore
+            else:
+                raise ValueError(
+                    f"Invalid input layout: {self.attn_backend.get_input_layout()}"
+                )
+
             if self.use_direct_call:
-                forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
@@ -279,7 +300,13 @@ class Attention(nn.Module, AttentionLayerBase):
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
-            return output.view(-1, hidden_size)
+
+            # Handles the case of an attention backend returning FP8 output, when using BF16 weights.
+            if self.dtype == output.dtype:
+                return output.view(-1, q_dimension)
+            else:
+                return output.view(-1, q_dimension).to(self.dtype)
+
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()
