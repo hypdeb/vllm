@@ -258,8 +258,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=self.dtype,
             device=self.device)
         self.query_lens = torch.zeros(self.max_num_reqs,
-                                    dtype=torch.int32,
-                                    device=self.device)
+                                      dtype=torch.int32,
+                                      device=self.device)
 
         # # None in the first PP rank. The rest are set after load_model.
         # self.intermediate_tensors: Optional[IntermediateTensors] = None
@@ -289,9 +289,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        self.max_num_tokens),
                                    dtype=np.int64)
         self.query_lens_cpu = torch.zeros(self.max_num_reqs,
-                                    dtype=torch.int32,
-                                    device="cpu",
-                                    pin_memory=self.pin_memory)
+                                          dtype=torch.int32,
+                                          device="cpu",
+                                          pin_memory=self.pin_memory)
         self.query_lens_cpu_np = self.query_lens_cpu.numpy()
 
         # Layer pairings for cross-layer KV sharing.
@@ -846,6 +846,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 query_start_loc_cpu=query_start_loc_cpu,
                 seq_lens=seq_lens,
                 seq_lens_cpu=seq_lens_cpu,
+                query_lens=self.query_lens,
+                query_lens_cpu=self.query_lens_cpu,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,

@@ -12,7 +12,8 @@ import numpy as np
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionType, InputLayout)
+                                              AttentionLayer, AttentionType,
+                                              InputLayout)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import current_stream
@@ -35,9 +36,6 @@ logger = init_logger(__name__)
 
 rope_scaling_type_mapping = {
     "none": RotaryScalingType.NONE,
-    "linear": RotaryScalingType.LINEAR,
-    "dynamic": RotaryScalingType.DYNAMIC,
-    "longrope": RotaryScalingType.LONG,
     "llama3": RotaryScalingType.LLAMA3,
 }
 
@@ -164,12 +162,8 @@ def _torch_to_device_data_type(dtype: torch.dtype) -> DeviceDataType:
 
 class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
-    def __init__(
-        self,
-        kv_cache_spec: AttentionSpec,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         # These things appear to be implicitly required by vLLM, i.e. if you don't set them, vLLM will try to access them and throw.
         self.kv_cache_spec = kv_cache_spec
         self.kv_cache_device_data_type = _torch_to_device_data_type(
@@ -468,7 +462,7 @@ class TkeImpl(AttentionImpl):
 
     def forward(
         self,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -476,6 +470,7 @@ class TkeImpl(AttentionImpl):
         attn_metadata: TkeMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with TensorRT-LLM Kernel Export.
 

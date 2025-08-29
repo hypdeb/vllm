@@ -179,10 +179,18 @@ class Attention(nn.Module, AttentionLayerBase):
             self.attn_backend = attn_backend
 
         impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window, kv_cache_dtype,
-                             logits_soft_cap, attn_type,
-                             kv_sharing_target_layer_name, **extra_impl_args)
+        self.impl = impl_cls(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            **extra_impl_args)
         self.backend = backend_name_to_enum(self.attn_backend.get_name())
         self.dtype = dtype
 
