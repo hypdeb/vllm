@@ -51,7 +51,6 @@ class CommonAttentionMetadata:
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
 
-
     query_lens: torch.Tensor
     query_lens_cpu: torch.Tensor
     """(batch_size,), the length of each request including only newly scheduled tokens"""
@@ -138,6 +137,8 @@ def _make_metadata_with_slice(
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens_cpu,
+        query_lens=attn_metadata.query_lens,
+        query_lens_cpu=attn_metadata.query_lens_cpu,
         num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
