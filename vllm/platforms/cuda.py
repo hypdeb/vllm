@@ -375,7 +375,7 @@ class CudaPlatformBase(Platform):
             pass
         elif selected_backend:
             raise ValueError(
-                f"Invalid attention backend for {cls.device_name}, "
+                f"Invalid attention backend '{selected_backend}' for {cls.device_name}, "
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
@@ -520,8 +520,12 @@ class CudaPlatformBase(Platform):
             if attention_backend is None:
                 attention_backend = "FLASH_ATTN_VLLM_V1"
 
+            # TKE supports fp8 kv-cache dtype.
+            if attention_backend == "TKE":
+                supported = True
+
             # All Blackwell backends support fp8
-            if cls.is_device_capability(100):
+            elif cls.is_device_capability(100):
                 supported = True
             elif attention_backend == "FLASH_ATTN_VLLM_V1":
                 if fp8_attention:
