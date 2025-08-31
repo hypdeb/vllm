@@ -238,6 +238,7 @@ ACCURACY_BATCH_SIZE ?= 16
 install-lm-eval:
 	cd .. && git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
 	cd ../lm-evaluation-harness && pip install -e . -v
+	pip install git+https://github.com/felipemaiapolo/tinyBenchmarks
 
 # Small accuracy tests
 serve_tke:
@@ -254,13 +255,21 @@ query:
 	echo
 
 
-lm-eval-tiny-hellaswag-tke: delete-vllm-cache
+lm-eval-tiny-hellaswag-tke-fp8-ngram: delete-vllm-cache
 	$(TKE_FLAGS) lm_eval \
 		--model vllm \
 		--tasks tinyHellaswag \
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
 		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
+
+lm-eval-tiny-hellaswag-tke-fp8: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyHellaswag \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
+		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8"}'
 
 lm-eval-tiny-hellaswag-tke-mistral-fp8-ngram: delete-vllm-cache
 	$(TKE_FLAGS) lm_eval \
@@ -376,6 +385,7 @@ vllm-serve-flash-attn:
 		--tokenizer-mode mistral \
 		--tokenizer $(TOKENIZER_PATH) \
 	 	--kv-cache-dtype fp8 \
+		--served-model-name default_model \
 		--enforce-eager
 
 vllm-serve-tke-mistral: TKE_BACKEND := TKE
@@ -387,6 +397,7 @@ vllm-serve-tke-mistral:
 		--load-format mistral \
 		--tokenizer-mode mistral \
 		--tokenizer $(TOKENIZER_PATH_MISTRAL) \
+		--served-model-name default_model \
 		--enforce-eager
 
 vllm-serve-tke-mistral-fp8: TKE_BACKEND := TKE
@@ -398,6 +409,7 @@ vllm-serve-tke-mistral-fp8:
 		--load-format mistral \
 		--tokenizer-mode mistral \
 		--tokenizer $(TOKENIZER_PATH_MISTRAL) \
+		--served-model-name default_model \
 	 	--kv-cache-dtype fp8 \
 		--enforce-eager
 
@@ -410,6 +422,7 @@ vllm-serve-fa-mistral:
 		--load-format mistral \
 		--tokenizer-mode mistral \
 		--tokenizer $(TOKENIZER_PATH_MISTRAL) \
+		--served-model-name default_model \
 		--enforce-eager 
 
 
@@ -419,4 +432,14 @@ vllm-serve-tke:
 	 	$(MODEL_PATH) \
 	 	--tensor-parallel-size $(TP_SIZE) \
 		--quantization modelopt \
+		--served-model-name default_model \
 		--enforce-eager
+
+vllm-serve-tke-fp8: TKE_BACKEND := TKE
+vllm-serve-tke-fp8:
+	 VLLM_ATTENTION_BACKEND=$(TKE_BACKEND) $(NSYS_PROFILE_CMD) vllm serve \
+	 	$(MODEL_PATH) \
+	 	--tensor-parallel-size $(TP_SIZE) \
+		--quantization modelopt \
+		--served-model-name default_model \
+	 	--kv-cache-dtype fp8

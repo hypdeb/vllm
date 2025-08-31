@@ -32,8 +32,8 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionType
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.attention.layer import InputLayout
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -45,6 +45,8 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.config import (
+    RotaryEmbeddingConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -175,6 +177,11 @@ class LlamaAttention(nn.Module):
         attn_cls = (EncoderOnlyAttention
                     if attn_type == AttentionType.ENCODER_ONLY else Attention)
 
+        rope_config = RotaryEmbeddingConfig(
+            base=self.rope_theta,
+            max_positions=self.max_position_embeddings,
+            dimension=self.head_dim,
+        )
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -185,13 +192,14 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
+            rope_config=rope_config,
         )
 
         self.input_layout = self.attn.attn_backend.get_input_layout()
         self.backend_applies_rotary_embedding = self.attn.attn_backend.get_backend_applies_rotary_embedding(
         )
 
-        if not self.backend_applies_rotary_embedding:
+        if True or not self.backend_applies_rotary_embedding:
             self._init_rotary_emb(config,
                                   rope_scaling=rope_scaling,
                                   quant_config=quant_config)

@@ -6,27 +6,30 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Optional
 
 import numpy as np
 import torch
+from py_tke import (AttentionLayerDimensions, BlockOffsetLayout,
+                    DeviceDataType, PrefixCacheConfiguration, RotaryEmbedding,
+                    RotaryPositionalEmbeddingType, RotaryScalingType,
+                    calculate_workspace_size, create_op, run_context_inplace,
+                    run_generation_inplace)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType,
                                               InputLayout)
-from vllm.config import VllmConfig
+from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config.cache import CacheConfig
+from vllm.config.scheduler import SchedulerConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.rotary_embedding.config import (
+    RotaryEmbeddingConfig)
 from vllm.utils import current_stream
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-from py_tke import (AttentionLayerDimensions, AttentionOp, BlockOffsetLayout,
-                    DeviceDataType, PrefixCacheConfiguration, RotaryEmbedding,
-                    RotaryPositionalEmbeddingType, RotaryScalingType,
-                    calculate_workspace_size, create_op, run_context_inplace,
-                    run_generation_inplace)
 
 logger = init_logger(__name__)
 
@@ -90,7 +93,7 @@ class TkeAttentionBackend(AttentionBackend):
         return True
 
 
-@dataclass
+@dataclass(frozen=True)
 class TkeMetadata:
     # The shared attention metadata.
     common_attn_metadata: CommonAttentionMetadata
@@ -112,24 +115,6 @@ class TkeMetadata:
 
     # Pre-computed max input sequence length for the generation sequences in the batch.
     generation_max_input_sequence_length: int
-
-    # The fixed state of the attention operation.
-    op: AttentionOp
-
-    # The dimensions of the attention operation.
-    attention_layer_dimensions: AttentionLayerDimensions
-
-    # Sequence lengths denotes the length of the full sequence, including already processed tokens.
-    # Dimensions: [num_sequences], dtype: uint32
-    sequence_lengths_host: torch.Tensor
-
-    # Some space on device that the caller should allocate and pass to the forward calls.
-    # The dimension is obtained by calling calculate_workspace_size, in bytes.
-    workspace: torch.Tensor
-
-    # The rotary cos/sin cache is a precomputed cache of the rotary cos/sin rotation coefficients.
-    # Dimensions: [num_positions, embedding_dim / 2, 2], which usually gets 'shortened' to [num_positions, embedding_dim], dtype: float32
-    rotary_cos_sin_cache: torch.Tensor
 
     # The number of sequences in context phase.
     num_context_sequences: int
@@ -156,6 +141,16 @@ def _torch_to_device_data_type(dtype: torch.dtype) -> DeviceDataType:
     raise RuntimeError(f"Unsupported dtype: {dtype}")
 
 
+def _str_to_device_data_type(dtype: str) -> DeviceDataType:
+    if dtype == "fp8_e4m3":
+        return DeviceDataType.FP8_E4M3
+    if dtype == "fp8":
+        return DeviceDataType.FP8_E4M3
+    if dtype == "bfloat16":
+        return DeviceDataType.BF16
+    raise RuntimeError(f"Unsupported dtype: {dtype}")
+
+
 class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
     def reorder_batch_threshold(self) -> Optional[int]:
@@ -164,16 +159,11 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
 
-        # We might not need the following assignments, but vLLM relies on them.
-        self.kv_cache_spec = kv_cache_spec
-
         # For this backend, the data type of the kv-cache determines the data type in which we perform operation.
         self.kv_cache_device_data_type = _torch_to_device_data_type(
             kv_cache_spec.dtype)
 
-        # NOTE: XQA BF16 is not enabled yet, meaning that for BF16 attention, we always use FMHA_V2.
-        self.xqa_enabled = (
-            self.kv_cache_device_data_type == DeviceDataType.FP8_E4M3)
+        self.xqa_enabled = self.kv_cache_device_data_type == DeviceDataType.FP8_E4M3
 
         # When doing speculative decoding, consider all input sequences with fewer tokens than the configured number of
         # speculative tokens as "decode" requests and pull them to the front of the batch.
@@ -186,150 +176,6 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         else:
             self._reorder_batch_threshold = None
 
-        model_config = vllm_config.model_config
-        self.num_heads_q = model_config.get_num_attention_heads(
-            vllm_config.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(
-            vllm_config.parallel_config)
-        self.head_dimension = model_config.get_head_size()
-
-        # Extract the dimensions of the attention layer.
-        self.attention_layer_dimensions = AttentionLayerDimensions()
-        self.attention_layer_dimensions.numQHeads = self.num_heads_q
-        self.attention_layer_dimensions.numKVHeads = self.num_heads_kv
-        self.attention_layer_dimensions.headSize = self.head_dimension
-
-        # Extract the configuration of the KV-cache.
-        prefix_cache_configuration = PrefixCacheConfiguration()
-        prefix_cache_configuration.dataType = self.kv_cache_device_data_type
-        prefix_cache_configuration.numTokensPerBlock = kv_cache_spec.block_size
-        prefix_cache_configuration.maxNumBlocksPerSequence = (
-            vllm_config.model_config.max_model_len // kv_cache_spec.block_size)
-        prefix_cache_configuration.blockOffsetLayout = BlockOffsetLayout.VLLM
-
-        # Internal quantity used to size the kv-cache TMA descriptor.
-        # TODO: calculate this value from the size of the kv-cache. It needs to be large enough that the TMA descriptor can fit the whole kv-cache tensor.
-        # I couldn't find a way to access the actual size of the kv-cache at this time. The 'num_blocks' on the kv-cache config is not set at this point.
-        prefix_cache_configuration.maxNumSequences = 8192
-
-        # Extract information about the rotary positional embedding so that we can calculate the rotation coefficient cache.
-        rotary_positional_embedding = RotaryEmbedding()
-        rope_scaling = getattr(model_config, "rope_scaling", None)
-
-        if rope_scaling is not None:
-            scaling_factor = rope_scaling.get("factor", 1.0)
-            rotary_positional_embedding.rotaryEmbeddingScale = scaling_factor
-
-            scaling_type_value = rope_scaling_type_mapping[rope_scaling.get(
-                "rope_type", "none")]
-            rotary_positional_embedding.rotaryScalingType = scaling_type_value
-        else:
-            rotary_positional_embedding.rotaryEmbeddingScale = 1.0
-
-        # FIXME: the value we find here is different from the value the attention layer finds when initializing the position encoding.
-        # max_position_embeddings = getattr(model_config, "max_model_len", 8192)
-        max_position_embeddings = 131072
-        rotary_positional_embedding.rotaryEmbeddingMaxPositions = (
-            max_position_embeddings)
-
-        # FIXME: somehow this is set to None, even though it is available on the model config.
-        # rope_theta = getattr(model_config, "rope_theta", 10000)
-        rope_theta = 1000000000
-        rotary_positional_embedding.rotaryEmbeddingBase = rope_theta
-
-        embedding_dim = vllm_config.model_config.get_head_size()
-        rotary_positional_embedding.rotaryEmbeddingDim = embedding_dim
-
-        embedding_type = RotaryPositionalEmbeddingType.GPT_NEOX
-        rotary_positional_embedding.type = embedding_type
-
-        max_attention_window_size = vllm_config.model_config.max_model_len
-        cyclic_attention_window_size = vllm_config.model_config.max_model_len
-
-        # An internal buffer used by the XQA kernel. Needs to be initialized to 0.
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.multi_block_semaphores = torch.zeros(
-            self.num_heads_q * max_num_seqs,
-            device=torch.device("cuda"),
-            dtype=torch.int32,
-            requires_grad=False,
-        ).contiguous()
-
-        # TODO: needs to be set correctly on each batch. Move to forward. Seems to be always 1.0 though.
-        self.output_scaling_factor = torch.tensor(
-            [1.0],
-            dtype=torch.float32,
-            device=torch.device("cuda"),
-            requires_grad=False,
-        )
-
-        # NOTE: According to modelopt team, 1.0 is almost always the optimal value.
-        # TODO: There should also be the equivalent dequantization factor. Add support for that.
-        self.kv_cache_dequantization_factor = torch.tensor(
-            [1.0],
-            dtype=torch.float32,
-            device=torch.device("cuda"),
-            requires_grad=False,
-        )
-
-        # Create a representation of the fixed parameters of the attention operation.
-        self.op = create_op(
-            inputDataType=DeviceDataType.BF16,
-            outputDataType=_torch_to_device_data_type(kv_cache_spec.dtype),
-            attentionLayerDimensions=self.attention_layer_dimensions,
-            rotaryEmbedding=rotary_positional_embedding,
-            prefixCacheConfiguration=prefix_cache_configuration,
-            qScaling=
-            1.0,  # TODO: seems to be 1.0 most of the time, still, set correctly ultimately.
-            maxAttentionWindowSize=max_attention_window_size,
-            cyclicAttentionWindowSize=cyclic_attention_window_size,
-            outputScalingFactor=self.output_scaling_factor,
-            kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
-            multiBlockSemaphores=self.multi_block_semaphores,
-            enableMultiTokenGeneration=vllm_config.speculative_config
-            is not None,
-            xqaEnabled=self.xqa_enabled,
-        )
-
-        # The size in bytes of the workspace needed by FMHA and XQA.
-        workspace_size = calculate_workspace_size(
-            self.op,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.scheduler_config.max_num_seqs,
-        )
-
-        # Allocate the workspace.
-        self.workspace = torch.zeros(
-            workspace_size,
-            device=torch.device("cuda"),
-            dtype=torch.int8,
-            requires_grad=False,
-        ).contiguous()
-
-        _, self.rotary_cos_sin_ndarray = (
-            create_sinusoidal_positions_for_attention_plugin(
-                rotary_positional_embedding.rotaryEmbeddingMaxPositions,
-                rotary_positional_embedding.rotaryEmbeddingDim,
-                rotary_positional_embedding.rotaryEmbeddingBase,
-                rotary_positional_embedding.rotaryEmbeddingScale,
-                rotary_positional_embedding.rotaryScalingType,
-                rope_scaling_config=rope_scaling,
-            ))
-        self.rotary_cos_sin = torch.tensor(
-            self.rotary_cos_sin_ndarray,
-            dtype=torch.float32,
-            device="cuda",
-            requires_grad=False,
-        ).contiguous()
-
-        # Buffer to store the sequence lengths on the host. Required by the ops.
-        self.sequence_lengths_host = torch.zeros(
-            vllm_config.scheduler_config.max_num_seqs,
-            device=torch.device("cpu"),
-            dtype=torch.int32,
-            requires_grad=False,
-        ).contiguous()
-
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False  # TODO: implement this
 
@@ -339,9 +185,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ):
-        # NOTE: this stuff is getting a bit confusing, but basically, if we don't set a threshold, as far as this backend is concerned,
-        # all requests are prefill (i.e. do not use generation optimized kernels).
-        if self._reorder_batch_threshold is not None:
+        if self.xqa_enabled:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
                 split_decodes_and_prefills(common_attn_metadata)
         else:
@@ -372,11 +216,6 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             generation_max_sequence_length=int(generation_max_sequence_length),
             generation_max_input_sequence_length=int(
                 generation_max_input_sequence_length),
-            op=self.op,
-            attention_layer_dimensions=self.attention_layer_dimensions,
-            sequence_lengths_host=common_attn_metadata.seq_lens_cpu,
-            workspace=self.workspace,
-            rotary_cos_sin_cache=self.rotary_cos_sin,
             num_context_sequences=num_prefills,
             num_context_tokens=num_prefill_tokens,
             num_generation_sequences=num_decodes,
@@ -395,12 +234,149 @@ class TkeImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
+        rotary_embedding_config: Optional[RotaryEmbeddingConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+        speculative_decoding_config: Optional[SpeculativeConfig] = None,
+        scheduler_config: Optional[SchedulerConfig] = None,
     ) -> None:
+        if rotary_embedding_config is None:
+            raise RuntimeError(
+                "The TKE backend needs to have a configured RoPE.")
+
+        if cache_config is None:
+            raise RuntimeError(
+                "The TKE backend needs to know about the cache configuration.")
+
+        if scheduler_config is None:
+            raise RuntimeError(
+                "The TKE backend needs to know about the scheduler configuration."
+            )
+
+        kv_cache_device_data_type = _str_to_device_data_type(kv_cache_dtype)
+
+        # Extract the dimensions of the attention layer.
+        self.attention_layer_dimensions = AttentionLayerDimensions()
+        self.attention_layer_dimensions.numQHeads = num_heads
+        self.attention_layer_dimensions.numKVHeads = num_kv_heads
+        self.attention_layer_dimensions.headSize = head_size
+
+        # Extract the configuration of the KV-cache.
+        prefix_cache_configuration = PrefixCacheConfiguration()
+        prefix_cache_configuration.dataType = kv_cache_device_data_type
+        prefix_cache_configuration.numTokensPerBlock = cache_config.block_size
+        prefix_cache_configuration.maxNumBlocksPerSequence = (
+            rotary_embedding_config.max_positions // cache_config.block_size)
+        prefix_cache_configuration.blockOffsetLayout = BlockOffsetLayout.VLLM
+
+        # Internal quantity used to size the kv-cache TMA descriptor.
+        # TODO: calculate this value from the size of the kv-cache. It needs to be large enough that the TMA descriptor can fit the whole kv-cache tensor.
+        # I couldn't find a way to access the actual size of the kv-cache at this time. The 'num_blocks' on the kv-cache config is not set at this point.
+        prefix_cache_configuration.maxNumSequences = 8192
+
+        # Extract RoPE configuration.
+        self.rotary_embedding = RotaryEmbedding()
+        self.rotary_embedding.rotaryEmbeddingBase = rotary_embedding_config.base
+        self.rotary_embedding.rotaryEmbeddingMaxPositions = rotary_embedding_config.max_positions
+        self.rotary_embedding.rotaryEmbeddingDim = rotary_embedding_config.dimension
+        self.rotary_embedding.rotaryEmbeddingScale = 1.0  # TODO: for now only support no scaling.
+        self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE  # TODO: ditto.
+        self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX  # TODO: only support GPT_NEOX for now.
+
+        # Debug prints for rotary embedding configuration
+        print(
+            f"TKE RoPE Config - Base: {self.rotary_embedding.rotaryEmbeddingBase}, "
+            f"MaxPositions: {self.rotary_embedding.rotaryEmbeddingMaxPositions}, "
+            f"Dimension: {self.rotary_embedding.rotaryEmbeddingDim}, "
+            f"Scale: {self.rotary_embedding.rotaryEmbeddingScale}, "
+            f"ScalingType: {self.rotary_embedding.rotaryScalingType}, "
+            f"Type: {self.rotary_embedding.type}")
+
+        _, self.rotary_cos_sin_ndarray = (
+            create_sinusoidal_positions_for_attention_plugin(
+                self.rotary_embedding.rotaryEmbeddingMaxPositions,
+                self.rotary_embedding.rotaryEmbeddingDim,
+                self.rotary_embedding.rotaryEmbeddingBase,
+                self.rotary_embedding.rotaryEmbeddingScale,
+                self.rotary_embedding.rotaryScalingType,
+            ))
+        self.rotary_cos_sin = torch.tensor(
+            self.rotary_cos_sin_ndarray,
+            dtype=torch.float32,
+            device="cuda",
+            requires_grad=False,
+        ).contiguous()
+        self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
+        )
+
+        # FIXME: should be moved to forward().
+        self.output_scaling_factor = torch.tensor(
+            [1.0],
+            dtype=torch.float32,
+            device=torch.device("cuda"),
+            requires_grad=False,
+        )
+
+        # NOTE: According to modelopt team, 1.0 is almost always the optimal value.
+        # TODO: There should also be the equivalent dequantization factor. Add support for that.
+        self.kv_cache_dequantization_factor = torch.tensor(
+            [1.0],
+            dtype=torch.float32,
+            device=torch.device("cuda"),
+            requires_grad=False,
+        )
+
+        # NOTE: XQA BF16 is not enabled yet, meaning that for BF16 attention, we always use FMHA_V2.
+        self.xqa_enabled = (
+            kv_cache_device_data_type == DeviceDataType.FP8_E4M3)
+
+        # An internal buffer used by the XQA kernel. Needs to be initialized to 0.
+        max_num_seqs = scheduler_config.max_num_seqs
+        self.multi_block_semaphores = torch.zeros(
+            num_heads * max_num_seqs,
+            device=torch.device("cuda"),
+            dtype=torch.int32,
+            requires_grad=False,
+        ).contiguous()
+
+        # Create a representation of the fixed parameters of the attention operation.
+        self.op = create_op(
+            inputDataType=DeviceDataType.BF16,
+            outputDataType=kv_cache_device_data_type,
+            attentionLayerDimensions=self.attention_layer_dimensions,
+            prefixCacheConfiguration=prefix_cache_configuration,
+            qScaling=
+            1.0,  # TODO: seems to be 1.0 most of the time, still, set correctly ultimately.
+            maxAttentionWindowSize=rotary_embedding_config.
+            max_positions,  # TODO: set correctly.
+            cyclicAttentionWindowSize=rotary_embedding_config.
+            max_positions,  # TODO: set correctly.
+            outputScalingFactor=self.output_scaling_factor,
+            kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
+            multiBlockSemaphores=self.multi_block_semaphores,
+            enableMultiTokenGeneration=speculative_decoding_config is not None,
+            xqaEnabled=self.xqa_enabled,
+        )
+
+        # The size in bytes of the workspace needed by FMHA and XQA.
+        max_num_tokens = scheduler_config.max_num_batched_tokens
+        workspace_size = calculate_workspace_size(
+            self.op,
+            max_num_tokens,
+            max_num_seqs,
+        )
+
+        # Allocate the workspace.
+        self.workspace = torch.zeros(
+            workspace_size,
+            device=torch.device("cuda"),
+            dtype=torch.int8,
+            requires_grad=False,
+        ).contiguous()
+
         self.scale = scale
         self.num_heads = num_heads
         self.head_size = head_size
@@ -451,7 +427,7 @@ class TkeImpl(AttentionImpl):
         cuda_stream = current_stream()
         if attn_metadata.num_context_sequences > 0:
             run_context_inplace(
-                op=attn_metadata.op,
+                op=self.op,
                 numContextSequences=attn_metadata.num_context_sequences,
                 numContextTokens=attn_metadata.num_context_tokens,
                 maxSequenceLength=attn_metadata.context_max_sequence_length,
@@ -464,15 +440,15 @@ class TkeImpl(AttentionImpl):
                 context_input_sequence_lengths_device,
                 kvCacheBlockOffsets=attn_metadata.context_block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
-                rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
+                rotaryEmbedding=self.rotary_embedding,
                 outputPtr=output.data_ptr(),
-                workspace=attn_metadata.workspace,
+                workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
             )
 
         if attn_metadata.num_generation_sequences > 0:
             run_generation_inplace(
-                op=attn_metadata.op,
+                op=self.op,
                 numGenerationSequences=attn_metadata.num_generation_sequences,
                 numGenerationTokens=attn_metadata.num_generation_tokens,
                 maxSequenceLength=attn_metadata.generation_max_sequence_length,
@@ -488,9 +464,9 @@ class TkeImpl(AttentionImpl):
                 kvCacheBlockOffsets=attn_metadata.common_attn_metadata.
                 block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
-                rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
+                rotaryEmbedding=self.rotary_embedding,
                 outputPtr=output.data_ptr(),
-                workspace=attn_metadata.workspace,
+                workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
             )
 

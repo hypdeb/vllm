@@ -32,6 +32,8 @@ def get_rope(
     partial_rotary_factor: float = 1.0,
     dual_chunk_attention_config: Optional[dict[str, Any]] = None,
 ) -> RotaryEmbedding:
+    # Debug prints for get_rope function inputs
+
     if dtype is None:
         dtype = torch.get_default_dtype()
     if rope_scaling is not None:
