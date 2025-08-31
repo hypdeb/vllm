@@ -236,9 +236,8 @@ ACCURACY_BATCH_SIZE ?= 16
 
 # Infra
 install-lm-eval:
-	git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
-	cd lm-evaluation-harness
-	pip install -e .
+	cd .. && git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
+	cd ../lm-evaluation-harness && pip install -e . -v
 
 # Small accuracy tests
 serve_tke:
@@ -262,6 +261,23 @@ lm-eval-tiny-hellaswag-tke: delete-vllm-cache
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
 		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
+
+lm-eval-tiny-hellaswag-tke-mistral-fp8-ngram: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyHellaswag \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
+		--model_args '{"pretrained": "$(MODEL_PATH_MISTRAL)", "tensor_parallel_size": $(TP_SIZE), "tokenizer": "$(TOKENIZER_PATH_MISTRAL)", "tokenizer_mode": "mistral", "load_format": "mistral", "config_format": "mistral", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
+
+lm-eval-tiny-hellaswag-tke-mistral-fp8: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyHellaswag \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
+		--model_args '{"pretrained": "$(MODEL_PATH_MISTRAL)", "tensor_parallel_size": $(TP_SIZE), "tokenizer": "$(TOKENIZER_PATH_MISTRAL)", "tokenizer_mode": "mistral", "load_format": "mistral", "config_format": "mistral", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8"}'
+
 
 lm-eval-tiny-hellaswag-flash-attn: delete-vllm-cache
 	$(FLASH_ATTN_FLAGS) lm_eval \
