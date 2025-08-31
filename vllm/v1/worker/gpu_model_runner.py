@@ -2887,7 +2887,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # check that if any backends reorder batches; that the reordering
             # is compatible (e.g., decode threshold is the same)
             reorder_batch_threshold_i = (
-                attn_metadata_builder_i.reorder_batch_threshold)
+                attn_metadata_builder_i.reorder_batch_threshold())
             if reorder_batch_threshold_i is not None:
                 if self.reorder_batch_threshold is not None:
                     if reorder_batch_threshold_i != \

@@ -424,7 +424,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
-    reorder_batch_threshold: ClassVar[int] = 1
+
+    def reorder_batch_threshold(self) -> Optional[int]:
+        return 1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,

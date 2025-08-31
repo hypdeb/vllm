@@ -22,10 +22,6 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
-
 from py_tke import (AttentionLayerDimensions, AttentionOp, BlockOffsetLayout,
                     DeviceDataType, PrefixCacheConfiguration, RotaryEmbedding,
                     RotaryPositionalEmbeddingType, RotaryScalingType,
@@ -162,19 +158,35 @@ def _torch_to_device_data_type(dtype: torch.dtype) -> DeviceDataType:
 
 class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
+    def reorder_batch_threshold(self) -> Optional[int]:
+        return self._reorder_batch_threshold
+
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        # These things appear to be implicitly required by vLLM, i.e. if you don't set them, vLLM will try to access them and throw.
+
+        # We might not need the following assignments, but vLLM relies on them.
         self.kv_cache_spec = kv_cache_spec
+
+        # For this backend, the data type of the kv-cache determines the data type in which we perform operation.
         self.kv_cache_device_data_type = _torch_to_device_data_type(
             kv_cache_spec.dtype)
 
-        # FIXME: XQA BF16 is not enabled yet, meaning that for BF16 attention, we always use FMHA_V2.
+        # NOTE: XQA BF16 is not enabled yet, meaning that for BF16 attention, we always use FMHA_V2.
         self.xqa_enabled = (
             self.kv_cache_device_data_type == DeviceDataType.FP8_E4M3)
 
-        model_config = vllm_config.model_config
+        # When doing speculative decoding, consider all input sequences with fewer tokens than the configured number of
+        # speculative tokens as "decode" requests and pull them to the front of the batch.
+        # Also, we do not need to do any reordering if we do not use generation optimized kernels (XQA) for generation.
+        if self.xqa_enabled:
+            if vllm_config.speculative_config is not None and vllm_config.speculative_config.num_speculative_tokens is not None:
+                self._reorder_batch_threshold: int | None = vllm_config.speculative_config.num_speculative_tokens
+            else:
+                self._reorder_batch_threshold = 1
+        else:
+            self._reorder_batch_threshold = None
 
+        model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(
             vllm_config.parallel_config)
         self.num_heads_kv = model_config.get_num_kv_heads(
@@ -189,12 +201,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
         # Extract the configuration of the KV-cache.
         prefix_cache_configuration = PrefixCacheConfiguration()
-
-        # TODO: instead of hardcoding it, get it from configuration, check that it is FP8,
-        # and throw otherwise as long as we only support FP8.
-        prefix_cache_configuration.dataType = _torch_to_device_data_type(
-            kv_cache_spec.dtype)
-
+        prefix_cache_configuration.dataType = self.kv_cache_device_data_type
         prefix_cache_configuration.numTokensPerBlock = kv_cache_spec.block_size
         prefix_cache_configuration.maxNumBlocksPerSequence = (
             vllm_config.model_config.max_model_len // kv_cache_spec.block_size)
@@ -326,89 +333,41 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False  # TODO: implement this
 
-    def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> bool:
-        """
-        Reorders the sequences in the batch so that the "decode" sequences are at the front of the batch.
-        We identify "decode" sequences as those with a single scheduled token, but it shouldn't matter: we can in theory also use our generation kernels for 1-token long context requests.
-        """
-
-        decode_indexes: list[int] = []
-        prefill_indexes: list[int] = []
-        num_prefill_tokens: int = 0
-        num_decode_tokens: int = 0
-
-        for index_in_batch, request_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            spec_tokens = scheduler_output.scheduled_spec_decode_tokens.get(
-                request_id, [])
-            num_spec_tokens = len(spec_tokens)
-
-            if self.xqa_enabled and num_tokens <= num_spec_tokens + 1:
-                decode_indexes.append(index_in_batch)
-                num_decode_tokens += num_tokens
-            else:
-                prefill_indexes.append(index_in_batch)
-                num_prefill_tokens += num_tokens
-
-        num_decodes = len(decode_indexes)
-        num_prefills = len(prefill_indexes)
-        modified_batch = False
-
-        # No need for reordering if we only use FMHA_V2.
-        if self.xqa_enabled:
-            for i in range(1, min(num_decodes, num_prefills) + 1):
-                decode_idx = decode_indexes[num_decodes - i]
-                prefill_idx = prefill_indexes[i - 1]
-                # If decode sequence is already positioned before prefill sequence, we're done
-                if decode_idx <= prefill_idx:
-                    break
-                input_batch.swap_states(decode_idx, prefill_idx)
-                modified_batch = True
-
-        # This is an 'arbitrary' split from vLLM's perspective, so we need to calculate these and store them ourselves.
-        self._num_context_sequences = num_prefills
-        self._num_context_tokens = num_prefill_tokens
-        self._num_generation_sequences = num_decodes
-        self._num_generation_tokens = num_decode_tokens
-
-        return modified_batch
-
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ):
-        context_max_sequence_length = (
-            common_attn_metadata.seq_lens_cpu[self._num_generation_sequences:].
-            max().item() if self._num_context_sequences > 0 else 0)
-        generation_max_sequence_length = (
-            common_attn_metadata.seq_lens_cpu[:self._num_generation_sequences].
-            max().item() if self._num_generation_sequences > 0 else 0)
-        generation_max_input_sequence_length = (
-            common_attn_metadata.
-            query_lens_cpu[:self._num_generation_sequences].max().item()
-            if self._num_generation_sequences > 0 else 0)
-
-        if not hasattr(self, "_num_context_sequences"):
-            # If not defined, calculate them from the metadata
-            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(common_attn_metadata))
+        # NOTE: this stuff is getting a bit confusing, but basically, if we don't set a threshold, as far as this backend is concerned,
+        # all requests are prefill (i.e. do not use generation optimized kernels).
+        if self._reorder_batch_threshold is not None:
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
+                split_decodes_and_prefills(common_attn_metadata)
         else:
-            num_decodes = self._num_generation_sequences
-            num_prefills = self._num_context_sequences
-            num_decode_tokens = self._num_generation_tokens
-            num_prefill_tokens = self._num_context_tokens
+            num_decodes = 0
+            num_prefills = common_attn_metadata.num_reqs
+            num_decode_tokens = 0
+            num_prefill_tokens = common_attn_metadata.num_actual_tokens
+
+        context_max_sequence_length = (
+            common_attn_metadata.seq_lens_cpu[num_decodes:].max().item()
+            if num_prefills > 0 else 0)
+        generation_max_sequence_length = (
+            common_attn_metadata.seq_lens_cpu[:num_decodes].max().item()
+            if num_decodes > 0 else 0)
+        generation_max_input_sequence_length = (
+            common_attn_metadata.query_lens_cpu[:num_decodes].max().item()
+            if num_decodes > 0 else 0)
 
         return TkeMetadata(
             common_attn_metadata=common_attn_metadata,
             context_sequence_lengths_device=common_attn_metadata.
-            seq_lens[self._num_generation_sequences:],
+            seq_lens[num_decodes:],
             context_input_sequence_lengths_device=common_attn_metadata.
-            query_lens[self._num_generation_sequences:],
+            query_lens[num_decodes:],
             context_block_table_tensor=common_attn_metadata.
-            block_table_tensor[self._num_generation_sequences:],
+            block_table_tensor[num_decodes:],
             context_max_sequence_length=int(context_max_sequence_length),
             generation_max_sequence_length=int(generation_max_sequence_length),
             generation_max_input_sequence_length=int(
