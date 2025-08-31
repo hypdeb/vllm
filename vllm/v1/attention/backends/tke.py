@@ -38,6 +38,9 @@ rope_scaling_type_mapping = {
     "llama3": RotaryScalingType.LLAMA3,
 }
 
+# Global cache for rotary cos/sin tensors
+_ROTARY_COS_SIN_CACHE: dict[tuple, torch.Tensor] = {}
+
 
 class TkeAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -286,29 +289,35 @@ class TkeImpl(AttentionImpl):
         self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE  # TODO: ditto.
         self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX  # TODO: only support GPT_NEOX for now.
 
-        # Debug prints for rotary embedding configuration
-        print(
-            f"TKE RoPE Config - Base: {self.rotary_embedding.rotaryEmbeddingBase}, "
-            f"MaxPositions: {self.rotary_embedding.rotaryEmbeddingMaxPositions}, "
-            f"Dimension: {self.rotary_embedding.rotaryEmbeddingDim}, "
-            f"Scale: {self.rotary_embedding.rotaryEmbeddingScale}, "
-            f"ScalingType: {self.rotary_embedding.rotaryScalingType}, "
-            f"Type: {self.rotary_embedding.type}")
+        # Create cache key for rotary cos/sin tensor
+        cache_key = (
+            self.rotary_embedding.rotaryEmbeddingMaxPositions,
+            self.rotary_embedding.rotaryEmbeddingDim,
+            self.rotary_embedding.rotaryEmbeddingBase,
+            self.rotary_embedding.rotaryEmbeddingScale,
+            self.rotary_embedding.rotaryScalingType,
+        )
 
-        _, self.rotary_cos_sin_ndarray = (
-            create_sinusoidal_positions_for_attention_plugin(
-                self.rotary_embedding.rotaryEmbeddingMaxPositions,
-                self.rotary_embedding.rotaryEmbeddingDim,
-                self.rotary_embedding.rotaryEmbeddingBase,
-                self.rotary_embedding.rotaryEmbeddingScale,
-                self.rotary_embedding.rotaryScalingType,
-            ))
-        self.rotary_cos_sin = torch.tensor(
-            self.rotary_cos_sin_ndarray,
-            dtype=torch.float32,
-            device="cuda",
-            requires_grad=False,
-        ).contiguous()
+        # Check if we already have the rotary cos/sin tensor in cache
+        if cache_key in _ROTARY_COS_SIN_CACHE:
+            self.rotary_cos_sin = _ROTARY_COS_SIN_CACHE[cache_key]
+        else:
+            _, self.rotary_cos_sin_ndarray = (
+                create_sinusoidal_positions_for_attention_plugin(
+                    self.rotary_embedding.rotaryEmbeddingMaxPositions,
+                    self.rotary_embedding.rotaryEmbeddingDim,
+                    self.rotary_embedding.rotaryEmbeddingBase,
+                    self.rotary_embedding.rotaryEmbeddingScale,
+                    self.rotary_embedding.rotaryScalingType,
+                ))
+            self.rotary_cos_sin = torch.tensor(
+                self.rotary_cos_sin_ndarray,
+                dtype=torch.float32,
+                device="cuda",
+                requires_grad=False,
+            ).contiguous()
+            # Cache the tensor for future use
+            _ROTARY_COS_SIN_CACHE[cache_key] = self.rotary_cos_sin
         self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
         )
 

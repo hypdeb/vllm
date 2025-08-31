@@ -232,7 +232,7 @@ all-samples: vllm-sample-flash-attn vllm-sample-tke vllm-sample-flashinfer-v1
 ######################## Accuracy #########################################################
 ###########################################################################################
 
-ACCURACY_BATCH_SIZE ?= 16
+ACCURACY_BATCH_SIZE ?= 1
 
 # Infra
 install-lm-eval:
