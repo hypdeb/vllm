@@ -376,6 +376,10 @@ class FlashAttentionMetadataBuilder(
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
 
+    def reorder_batch_threshold(self) -> Optional[int]:
+        # FA3 never reorders batches as it supports fully mixed batches out of the box.
+        return None
+
 
 class FlashAttentionImpl(AttentionImpl):
 
