@@ -51,10 +51,6 @@ class CommonAttentionMetadata:
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
 
-    query_lens: torch.Tensor
-    query_lens_cpu: torch.Tensor
-    """(batch_size,), the length of each request including only newly scheduled tokens"""
-
     num_computed_tokens_cpu: torch.Tensor
     """(batch_size,), the number of computed tokens for each request"""
 
@@ -137,8 +133,6 @@ def _make_metadata_with_slice(
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens_cpu,
-        query_lens=attn_metadata.query_lens,
-        query_lens_cpu=attn_metadata.query_lens_cpu,
         num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
@@ -563,8 +557,6 @@ def make_local_attention_virtual_batches(
                                                non_blocking=True),
         seq_lens_cpu=seq_lens_cpu,
         seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
-        query_lens=common_attn_metadata.query_lens,
-        query_lens_cpu=common_attn_metadata.query_lens_cpu,
         num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,

@@ -150,8 +150,8 @@ async def get_request(
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}.")
     # Convert to list to get length for ramp-up calculations
-    if isinstance(input_requests,
-                  Iterable) and not isinstance(input_requests, list):
+    if isinstance(input_requests, Iterable) and not isinstance(
+            input_requests, list):
         input_requests = list(input_requests)
 
     total_requests = len(input_requests)
@@ -1034,7 +1034,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="The ramp-up strategy. This would be used to "
         "ramp up the request rate from initial RPS to final "
         "RPS rate (specified by --ramp-up-start-rps and "
-        "--ramp-up-end-rps.) over the duration of the benchmark.")
+        "--ramp-up-end-rps.) over the duration of the benchmark."
+    )
     parser.add_argument(
         "--ramp-up-start-rps",
         type=int,
@@ -1073,11 +1074,13 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "When using ramp-up, do not specify --request-rate. "
                 "The request rate will be controlled by ramp-up parameters. "
-                "Please remove the --request-rate argument.")
+                "Please remove the --request-rate argument."
+            )
         if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
             raise ValueError(
                 "When using --ramp-up-strategy, both --ramp-up-start-rps and "
-                "--ramp-up-end-rps must be specified")
+                "--ramp-up-end-rps must be specified"
+            )
         if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
             raise ValueError("Ramp-up start and end RPS must be non-negative")
         if args.ramp_up_start_rps > args.ramp_up_end_rps:

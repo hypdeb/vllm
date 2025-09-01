@@ -1770,7 +1770,7 @@ class ModelConfig:
             sliding_window=self.get_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
-
+        logger.info("Using max model len %s", max_model_len)
         return max_model_len
 
 

@@ -747,8 +747,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc.np[num_reqs + 1:].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
-        self.query_lens_cpu_np[:num_reqs] = num_scheduled_tokens
-        self.query_lens.copy_(self.query_lens_cpu)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -846,8 +844,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 query_start_loc_cpu=query_start_loc_cpu,
                 seq_lens=seq_lens,
                 seq_lens_cpu=seq_lens_cpu,
-                query_lens=self.query_lens,
-                query_lens_cpu=self.query_lens_cpu,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
