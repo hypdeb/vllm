@@ -590,7 +590,7 @@ def save_to_pytorch_benchmark_format(
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
-    ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
+    ignored_metrics = ["itls"]
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={k: [results[k]] for k in metrics},
@@ -1103,7 +1103,7 @@ def create_argument_parser():
     parser.add_argument(
         "--percentile-metrics",
         type=str,
-        default="ttft,tpot,itl",
+        default="ttft,tpot,itl,e2el",
         help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
         'Allowed metric names are "ttft", "tpot", "itl", "e2el". '

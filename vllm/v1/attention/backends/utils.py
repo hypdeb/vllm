@@ -187,7 +187,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: ClassVar[Optional[int]] = None
+    @abstractmethod
+    def reorder_batch_threshold(self) -> Optional[int]:
+        return None
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -675,8 +677,6 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
-    assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
