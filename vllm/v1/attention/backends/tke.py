@@ -39,7 +39,9 @@ rope_scaling_type_mapping = {
 }
 
 # Global cache for rotary cos/sin tensors
-_ROTARY_COS_SIN_CACHE: dict[tuple, torch.Tensor] = {}
+_ROTARY_COS_SIN_CACHES: dict[tuple, torch.Tensor] = {}
+_WORKSPACE: Optional[tuple[int, torch.Tensor]] = None
+_MULTI_BLOCK_SEMAPHORES: dict[tuple, torch.Tensor] = {}
 
 
 class TkeAttentionBackend(AttentionBackend):
@@ -154,6 +156,10 @@ def _str_to_device_data_type(dtype: str) -> DeviceDataType:
         return DeviceDataType.FP8_E4M3
     if dtype == "bfloat16":
         return DeviceDataType.BF16
+
+    # This should resolve to a real data type earlier, but somehow it doesn't.
+    if dtype == "auto":
+        return DeviceDataType.BF16
     raise RuntimeError(f"Unsupported dtype: {dtype}")
 
 
@@ -254,6 +260,8 @@ class TkeImpl(AttentionImpl):
         speculative_decoding_config: Optional[SpeculativeConfig] = None,
         scheduler_config: Optional[SchedulerConfig] = None,
     ) -> None:
+        global _WORKSPACE, _ROTARY_COS_SIN_CACHES, _MULTI_BLOCK_SEMAPHORES
+
         if rotary_embedding_config is None:
             raise RuntimeError(
                 "The TKE backend needs to have a configured RoPE.")
@@ -276,17 +284,17 @@ class TkeImpl(AttentionImpl):
         self.attention_layer_dimensions.headSize = head_size
 
         # Extract the configuration of the KV-cache.
-        prefix_cache_configuration = PrefixCacheConfiguration()
-        prefix_cache_configuration.dataType = kv_cache_device_data_type
-        prefix_cache_configuration.numTokensPerBlock = cache_config.block_size
-        prefix_cache_configuration.maxNumBlocksPerSequence = (
+        self.prefix_cache_configuration = PrefixCacheConfiguration()
+        self.prefix_cache_configuration.dataType = kv_cache_device_data_type
+        self.prefix_cache_configuration.numTokensPerBlock = cache_config.block_size
+        self.prefix_cache_configuration.maxNumBlocksPerSequence = (
             rotary_embedding_config.max_positions // cache_config.block_size)
-        prefix_cache_configuration.blockOffsetLayout = BlockOffsetLayout.VLLM
+        self.prefix_cache_configuration.blockOffsetLayout = BlockOffsetLayout.VLLM
 
         # Internal quantity used to size the kv-cache TMA descriptor.
         # TODO: calculate this value from the size of the kv-cache. It needs to be large enough that the TMA descriptor can fit the whole kv-cache tensor.
         # I couldn't find a way to access the actual size of the kv-cache at this time. The 'num_blocks' on the kv-cache config is not set at this point.
-        prefix_cache_configuration.maxNumSequences = 8192
+        self.prefix_cache_configuration.maxNumSequences = 8192
 
         # Extract RoPE configuration.
         self.rotary_embedding = RotaryEmbedding()
@@ -307,8 +315,8 @@ class TkeImpl(AttentionImpl):
         )
 
         # Check if we already have the rotary cos/sin tensor in cache
-        if cache_key in _ROTARY_COS_SIN_CACHE:
-            self.rotary_cos_sin = _ROTARY_COS_SIN_CACHE[cache_key]
+        if cache_key in _ROTARY_COS_SIN_CACHES:
+            self.rotary_cos_sin = _ROTARY_COS_SIN_CACHES[cache_key]
         else:
             _, self.rotary_cos_sin_ndarray = (
                 create_sinusoidal_positions_for_attention_plugin(
@@ -325,7 +333,7 @@ class TkeImpl(AttentionImpl):
                 requires_grad=False,
             ).contiguous()
             # Cache the tensor for future use
-            _ROTARY_COS_SIN_CACHE[cache_key] = self.rotary_cos_sin
+            _ROTARY_COS_SIN_CACHES[cache_key] = self.rotary_cos_sin
         self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
         )
 
@@ -351,20 +359,25 @@ class TkeImpl(AttentionImpl):
             kv_cache_device_data_type == DeviceDataType.FP8_E4M3)
 
         # An internal buffer used by the XQA kernel. Needs to be initialized to 0.
+        # This is the reason why it is handled separately, instead of as part of the workspace,
+        # as we cannot guarantee the value of anything in the workspace.
         max_num_seqs = scheduler_config.max_num_seqs
-        self.multi_block_semaphores = torch.zeros(
-            num_heads * max_num_seqs,
-            device=torch.device("cuda"),
-            dtype=torch.int32,
-            requires_grad=False,
-        ).contiguous()
+        if (num_heads, max_num_seqs) not in _MULTI_BLOCK_SEMAPHORES:
+            _MULTI_BLOCK_SEMAPHORES[(num_heads, max_num_seqs)] = torch.zeros(
+                num_heads * max_num_seqs,
+                device=torch.device("cuda"),
+                dtype=torch.int32,
+                requires_grad=False,
+            ).contiguous()
+        self.multi_block_semaphores = _MULTI_BLOCK_SEMAPHORES[(num_heads,
+                                                               max_num_seqs)]
 
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
             inputDataType=DeviceDataType.BF16,
             outputDataType=kv_cache_device_data_type,
             attentionLayerDimensions=self.attention_layer_dimensions,
-            prefixCacheConfiguration=prefix_cache_configuration,
+            prefixCacheConfiguration=self.prefix_cache_configuration,
             qScaling=
             1.0,  # TODO: seems to be 1.0 most of the time, still, set correctly ultimately.
             maxAttentionWindowSize=rotary_embedding_config.
@@ -385,14 +398,15 @@ class TkeImpl(AttentionImpl):
             max_num_tokens,
             max_num_seqs,
         )
-
-        # Allocate the workspace.
-        self.workspace = torch.zeros(
-            workspace_size,
-            device=torch.device("cuda"),
-            dtype=torch.int8,
-            requires_grad=False,
-        ).contiguous()
+        if _WORKSPACE is None or _WORKSPACE[0] < workspace_size:
+            _WORKSPACE = (workspace_size,
+                          torch.zeros(
+                              workspace_size,
+                              device=torch.device("cuda"),
+                              dtype=torch.int8,
+                              requires_grad=False,
+                          ).contiguous())
+        self.workspace = _WORKSPACE[1]
 
         self.scale = scale
         self.num_heads = num_heads
@@ -440,8 +454,45 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
+        # Debug prints for attn_metadata contents
+        # print(f"TKE Forward - attn_metadata contents:")
+        # print(
+        #     f"  context_max_sequence_length: {attn_metadata.context_max_sequence_length}"
+        # )
+        # print(
+        #     f"  generation_max_sequence_length: {attn_metadata.generation_max_sequence_length}"
+        # )
+        # print(
+        #     f"  generation_max_input_sequence_length: {attn_metadata.generation_max_input_sequence_length}"
+        # )
+        # print(
+        #     f"  num_context_sequences: {attn_metadata.num_context_sequences}")
+        # print(f"  num_context_tokens: {attn_metadata.num_context_tokens}")
+        # print(
+        #     f"  num_generation_sequences: {attn_metadata.num_generation_sequences}"
+        # )
+        # print(
+        #     f"  num_generation_tokens: {attn_metadata.num_generation_tokens}")
+        # print(
+        #     f"  context_sequence_lengths_device shape: {attn_metadata.context_sequence_lengths_device.shape}"
+        # )
+        # print(
+        #     f"  context_input_sequence_lengths_device shape: {attn_metadata.context_input_sequence_lengths_device.shape}"
+        # )
+        # print(
+        #     f"  context_block_table_tensor shape: {attn_metadata.context_block_table_tensor.shape}"
+        # )
+        # print(f"  query_lens shape: {attn_metadata.query_lens.shape}")
+        # print(
+        #     f"  common_attn_metadata num_reqs: {attn_metadata.common_attn_metadata.num_reqs}"
+        # )
+        # print(
+        #     f"  common_attn_metadata num_actual_tokens: {attn_metadata.common_attn_metadata.num_actual_tokens}"
+        # )
+
         # NOTE: we have removed all calls to tensor slicing and viewing from this function intentionally, at the cost of making the API of TKE a bit more complex.
         cuda_stream = current_stream()
+
         if attn_metadata.num_context_sequences > 0:
             run_context_inplace(
                 op=self.op,
