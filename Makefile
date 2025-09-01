@@ -233,7 +233,7 @@ all-samples: vllm-sample-flash-attn vllm-sample-tke vllm-sample-flashinfer-v1
 ######################## Accuracy #########################################################
 ###########################################################################################
 
-ACCURACY_BATCH_SIZE ?= 1
+ACCURACY_BATCH_SIZE ?= 16
 
 # Infra
 install-lm-eval:
@@ -481,3 +481,13 @@ vllm-serve-tke-fp8:
 		--quantization modelopt \
 		--served-model-name default_model \
 	 	--kv-cache-dtype fp8
+
+vllm-serve-tke-fp8-eager: TKE_BACKEND := TKE
+vllm-serve-tke-fp8-eager:
+	 VLLM_ATTENTION_BACKEND=$(TKE_BACKEND) $(NSYS_PROFILE_CMD) vllm serve \
+	 	$(MODEL_PATH) \
+	 	--tensor-parallel-size $(TP_SIZE) \
+		--quantization modelopt \
+		--served-model-name default_model \
+	 	--kv-cache-dtype fp8 \
+		--enforce-eager

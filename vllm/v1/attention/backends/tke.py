@@ -84,10 +84,10 @@ class TkeAttentionBackend(AttentionBackend):
         return (0, 1, 3, 2, 4)
 
     @staticmethod
-    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
-        if kv_cache_dtype == torch.uint8:
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        if kv_cache_dtype == "fp8" or kv_cache_dtype == 'fp8_e4m3':
             return torch.float8_e4m3fn
-        return kv_cache_dtype
+        return torch.bfloat16
 
     @staticmethod
     def get_input_layout() -> InputLayout:

@@ -120,7 +120,7 @@ class FlashInferBackend(AttentionBackend):
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
     @staticmethod
-    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
         return torch.bfloat16
 
     @staticmethod
