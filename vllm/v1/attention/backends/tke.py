@@ -110,6 +110,9 @@ class TkeMetadata:
     # Pre-computed block table tensor for the prefill/context sequences in the batch.
     context_block_table_tensor: torch.Tensor
 
+    # Length of queries for all sequences in the batch.
+    query_lens: torch.Tensor
+
     # Pre-computed max sequence length for the prefill/context sequences in the batch.
     context_max_sequence_length: int
 
@@ -197,6 +200,11 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             num_decode_tokens = 0
             num_prefill_tokens = common_attn_metadata.num_actual_tokens
 
+        query_lens_cpu = common_attn_metadata.query_start_loc_cpu[
+            1:] - common_attn_metadata.query_start_loc_cpu[:-1]
+        query_lens = common_attn_metadata.query_start_loc[
+            1:] - common_attn_metadata.query_start_loc[:-1]
+
         context_max_sequence_length = (
             common_attn_metadata.seq_lens_cpu[num_decodes:].max().item()
             if num_prefills > 0 else 0)
@@ -204,17 +212,17 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             common_attn_metadata.seq_lens_cpu[:num_decodes].max().item()
             if num_decodes > 0 else 0)
         generation_max_input_sequence_length = (
-            common_attn_metadata.query_lens_cpu[:num_decodes].max().item()
+            query_lens_cpu[:num_decodes].max().item()
             if num_decodes > 0 else 0)
 
         return TkeMetadata(
             common_attn_metadata=common_attn_metadata,
             context_sequence_lengths_device=common_attn_metadata.
             seq_lens[num_decodes:],
-            context_input_sequence_lengths_device=common_attn_metadata.
-            query_lens[num_decodes:],
+            context_input_sequence_lengths_device=query_lens[num_decodes:],
             context_block_table_tensor=common_attn_metadata.
             block_table_tensor[num_decodes:],
+            query_lens=query_lens,
             context_max_sequence_length=int(context_max_sequence_length),
             generation_max_sequence_length=int(generation_max_sequence_length),
             generation_max_input_sequence_length=int(
@@ -468,8 +476,7 @@ class TkeImpl(AttentionImpl):
                 qkv=query,
                 sequenceLengthsDevice=attn_metadata.common_attn_metadata.
                 seq_lens,
-                inputSequenceLengthsDevice=attn_metadata.common_attn_metadata.
-                query_lens,
+                inputSequenceLengthsDevice=attn_metadata.query_lens,
                 kvCacheBlockOffsets=attn_metadata.common_attn_metadata.
                 block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),

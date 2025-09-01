@@ -47,10 +47,6 @@ def create_common_attn_metadata(
     query_start_loc = torch.zeros(batch_spec.batch_size + 1,
                                   dtype=torch.int32,
                                   device=device)
-    query_lens = torch.tensor(batch_spec.query_lens,
-                              dtype=torch.int32,
-                              device=device)
-    query_start_loc[1:] = query_lens.cumsum(0)
     query_start_loc_cpu = query_start_loc.cpu()
     num_tokens = batch_spec.compute_num_tokens()
 

@@ -263,13 +263,21 @@ lm-eval-tiny-hellaswag-tke-fp8-ngram: delete-vllm-cache
 		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
 		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8", "speculative_config": {"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}}'
 
-lm-eval-tiny-hellaswag-tke-fp8: delete-vllm-cache
+lm-eval-tiny-hellaswag-tke-fp8-eager: delete-vllm-cache
 	$(TKE_FLAGS) lm_eval \
 		--model vllm \
 		--tasks tinyHellaswag \
 		--batch_size $(ACCURACY_BATCH_SIZE) \
 		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
 		--model_args '{"enforce_eager": true, "pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8"}'
+
+lm-eval-tiny-hellaswag-tke-fp8: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyHellaswag \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
+		--model_args '{"pretrained": "$(MODEL_PATH)", "tensor_parallel_size": $(TP_SIZE), "quantization": "modelopt", "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8"}'
 
 lm-eval-tiny-hellaswag-tke-mistral-fp8-ngram: delete-vllm-cache
 	$(TKE_FLAGS) lm_eval \
