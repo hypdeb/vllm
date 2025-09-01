@@ -343,11 +343,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
 
-            # Handles the case of an attention backend returning FP8 output, when using BF16 weights.
-            if self.dtype == output.dtype:
-                return output.view(-1, q_dimension)
-            else:
-                return output.view(-1, q_dimension).to(self.dtype)
+            return output.view(-1, q_dimension)
 
         else:
             if self.use_direct_call:

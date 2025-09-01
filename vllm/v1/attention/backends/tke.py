@@ -454,42 +454,6 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
-        # Debug prints for attn_metadata contents
-        # print(f"TKE Forward - attn_metadata contents:")
-        # print(
-        #     f"  context_max_sequence_length: {attn_metadata.context_max_sequence_length}"
-        # )
-        # print(
-        #     f"  generation_max_sequence_length: {attn_metadata.generation_max_sequence_length}"
-        # )
-        # print(
-        #     f"  generation_max_input_sequence_length: {attn_metadata.generation_max_input_sequence_length}"
-        # )
-        # print(
-        #     f"  num_context_sequences: {attn_metadata.num_context_sequences}")
-        # print(f"  num_context_tokens: {attn_metadata.num_context_tokens}")
-        # print(
-        #     f"  num_generation_sequences: {attn_metadata.num_generation_sequences}"
-        # )
-        # print(
-        #     f"  num_generation_tokens: {attn_metadata.num_generation_tokens}")
-        # print(
-        #     f"  context_sequence_lengths_device shape: {attn_metadata.context_sequence_lengths_device.shape}"
-        # )
-        # print(
-        #     f"  context_input_sequence_lengths_device shape: {attn_metadata.context_input_sequence_lengths_device.shape}"
-        # )
-        # print(
-        #     f"  context_block_table_tensor shape: {attn_metadata.context_block_table_tensor.shape}"
-        # )
-        # print(f"  query_lens shape: {attn_metadata.query_lens.shape}")
-        # print(
-        #     f"  common_attn_metadata num_reqs: {attn_metadata.common_attn_metadata.num_reqs}"
-        # )
-        # print(
-        #     f"  common_attn_metadata num_actual_tokens: {attn_metadata.common_attn_metadata.num_actual_tokens}"
-        # )
-
         # NOTE: we have removed all calls to tensor slicing and viewing from this function intentionally, at the cost of making the API of TKE a bit more complex.
         cuda_stream = current_stream()
 
