@@ -257,12 +257,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
-        self.query_lens = torch.zeros(self.max_num_reqs,
-                                      dtype=torch.int32,
-                                      device=self.device)
-
-        # # None in the first PP rank. The rest are set after load_model.
-        # self.intermediate_tensors: Optional[IntermediateTensors] = None
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -288,11 +282,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        self.max_model_len,
                                        self.max_num_tokens),
                                    dtype=np.int64)
-        self.query_lens_cpu = torch.zeros(self.max_num_reqs,
-                                          dtype=torch.int32,
-                                          device="cpu",
-                                          pin_memory=self.pin_memory)
-        self.query_lens_cpu_np = self.query_lens_cpu.numpy()
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -2317,8 +2306,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                                  1],
                     seq_lens=self.seq_lens.gpu[:num_reqs],
                     seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    query_lens=self.query_lens[:num_reqs],
-                    query_lens_cpu=self.query_lens_cpu[:num_reqs],
                     num_computed_tokens_cpu=self.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs],
                     num_reqs=num_reqs,
