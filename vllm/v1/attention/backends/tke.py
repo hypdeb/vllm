@@ -10,9 +10,8 @@ from typing import Optional
 
 import numpy as np
 import torch
-from py_tke import (AttentionLayerDimensions, AttentionLayerParameters,
-                    BlockOffsetLayout, DeviceDataType,
-                    PrefixCacheConfiguration, RotaryEmbedding,
+from py_tke import (AttentionLayerDimensions, InputScales, BlockOffsetLayout,
+                    DeviceDataType, PrefixCacheConfiguration, RotaryEmbedding,
                     RotaryPositionalEmbeddingType, RotaryScalingType,
                     calculate_workspace_size, create_op, run_context_inplace,
                     run_generation_inplace)
@@ -283,11 +282,6 @@ class TkeImpl(AttentionImpl):
 
         kv_cache_device_data_type = _str_to_device_data_type(kv_cache_dtype)
 
-        if kv_cache_device_data_type == DeviceDataType.FP8_E4M3 and attention_layer is None:
-            raise RuntimeError(
-                "The TKE backend needs to know about the quantization configuration when using FP8."
-            )
-
         # Extract the dimensions of the attention layer.
         self.attention_layer_dimensions = AttentionLayerDimensions()
         self.attention_layer_dimensions.numQHeads = num_heads
@@ -309,14 +303,6 @@ class TkeImpl(AttentionImpl):
         # TODO: calculate this value from the size of the kv-cache. It needs to be large enough that the TMA descriptor can fit the whole kv-cache tensor.
         # I couldn't find a way to access the actual size of the kv-cache at this time. The 'num_blocks' on the kv-cache config is not set at this point.
         self.prefix_cache_configuration.maxNumSequences = 8192
-
-        # FIXME: should be moved to forward().
-        self.output_scaling_factor = torch.tensor(
-            [1.0],
-            dtype=torch.float32,
-            device=torch.device("cuda"),
-            requires_grad=False,
-        )
 
         # NOTE: XQA BF16 is not enabled yet, meaning that for BF16 attention, we always use FMHA_V2.
         self.xqa_enabled = (
@@ -342,12 +328,8 @@ class TkeImpl(AttentionImpl):
             outputDataType=kv_cache_device_data_type,
             attentionLayerDimensions=self.attention_layer_dimensions,
             prefixCacheConfiguration=self.prefix_cache_configuration,
-            maxAttentionWindowSize=self.rotary_embedding.
-            rotaryEmbeddingMaxPositions,
-            cyclicAttentionWindowSize=self.rotary_embedding.
-            rotaryEmbeddingMaxPositions,
             multiBlockSemaphores=self.multi_block_semaphores,
-            enableMultiTokenGeneration=speculative_decoding_config is not None,
+            enableSpeculativeDecoding=speculative_decoding_config is not None,
             xqaEnabled=self.xqa_enabled,
         )
 
@@ -454,7 +436,6 @@ class TkeImpl(AttentionImpl):
                         device="cuda",
                         requires_grad=False,
                     )
-                    print(f"self.rotary_cos_sin: {self.rotary_cos_sin}")
                     _ROPE_COEFF_CACHE[cache_key] = self.rotary_cos_sin
                 self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
                 )
@@ -491,16 +472,13 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
-        # FIXME: ".item" is going to be extremely slow.
-        attention_layer_parameters = AttentionLayerParameters()
-        attention_layer_parameters.qScale = layer._q_scale.item()
-        attention_layer_parameters.outputScalingFactorDevice = self.dummy_output_scale.data_ptr(
-        )
-        attention_layer_parameters.outputScalingFactorHost = 1.0
-        attention_layer_parameters.kScaleDevice = layer._k_scale.data_ptr()
-        attention_layer_parameters.kScale = layer._k_scale_float
-        attention_layer_parameters.vScaleDevice = layer._v_scale.data_ptr()
-        attention_layer_parameters.vScale = layer._v_scale_float
+        input_scales = InputScales()
+        input_scales.qScale = layer._q_scale_float
+        input_scales.qScaleDevice = layer._q_scale.data_ptr()
+        input_scales.kScale = layer._k_scale_float
+        input_scales.kScaleDevice = layer._k_scale.data_ptr()
+        input_scales.vScale = layer._v_scale_float
+        input_scales.vScaleDevice = layer._v_scale.data_ptr()
 
         # NOTE: we have removed all calls to tensor slicing and viewing from this function intentionally, at the cost of making the API of TKE a bit more complex.
         cuda_stream = current_stream()
@@ -521,7 +499,8 @@ class TkeImpl(AttentionImpl):
                 kvCacheBlockOffsets=attn_metadata.context_block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
-                attentionLayerParameters=attention_layer_parameters,
+                inputScales=input_scales,
+                outputScalingFactor=self.dummy_output_scale.data_ptr(),
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
@@ -545,7 +524,8 @@ class TkeImpl(AttentionImpl):
                 block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
-                attentionLayerParameters=attention_layer_parameters,
+                inputScales=input_scales,
+                outputScalingFactor=self.dummy_output_scale.data_ptr(),
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
