@@ -10,8 +10,9 @@ from typing import Optional
 
 import numpy as np
 import torch
-from py_tke import (AttentionLayerDimensions, BlockOffsetLayout,
-                    DeviceDataType, PrefixCacheConfiguration, RotaryEmbedding,
+from py_tke import (AttentionLayerDimensions, AttentionLayerParameters,
+                    BlockOffsetLayout, DeviceDataType,
+                    PrefixCacheConfiguration, RotaryEmbedding,
                     RotaryPositionalEmbeddingType, RotaryScalingType,
                     calculate_workspace_size, create_op, run_context_inplace,
                     run_generation_inplace)
@@ -23,8 +24,9 @@ from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.rotary_embedding.common import yarn_get_mscale
 from vllm.model_executor.layers.rotary_embedding.config import (
-    RotaryEmbeddingConfig)
+    RotaryEmbeddingConfig, SimpleRotaryEmbedding, YarnRotaryEmbeddingConfig)
 from vllm.utils import current_stream
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
@@ -33,14 +35,14 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
-rope_scaling_type_mapping = {
-    "none": RotaryScalingType.NONE,
-    "llama3": RotaryScalingType.LLAMA3,
-}
+# The RoPE coefficients are read-only and identical given identical configurations. We cache them to reuse them across layers to save memory.
+_ROPE_COEFF_CACHE: dict[RotaryEmbeddingConfig, torch.Tensor] = {}
 
-# Global cache for rotary cos/sin tensors
-_ROTARY_COS_SIN_CACHES: dict[tuple, torch.Tensor] = {}
+# The kernel workspace is a slice of memory used in turns by each layer. The kernels should make no assumption about the content of this memory, therefore, we can reuse them across layers.
+# We only allocate the largest workspace required.
 _WORKSPACE: Optional[tuple[int, torch.Tensor]] = None
+
+# Unlike the workspace, the semaphores should be zero on kernel launch. Hence, we manage them separately, but we can still share them across layers, as the kernels do zero them out after execution.
 _MULTI_BLOCK_SEMAPHORES: dict[tuple, torch.Tensor] = {}
 
 
@@ -140,9 +142,10 @@ class TkeMetadata:
 def _torch_to_device_data_type(dtype: torch.dtype) -> DeviceDataType:
     if dtype == torch.float8_e4m3fn:
         return DeviceDataType.FP8_E4M3
-    if (
-            dtype == torch.uint8
-    ):  # FIXME: hmmm... I don't know why the dtype would be uint8 in the first place.
+
+    # vLLM uses uint8 to represent fp8 as kv-cache datatype sometimes.
+    # NOTE: if we ever need a real uint8 kv-cache, this will need addressing.
+    if (dtype == torch.uint8):
         return DeviceDataType.FP8_E4M3
     if dtype == torch.bfloat16:
         return DeviceDataType.BF16
@@ -158,6 +161,7 @@ def _str_to_device_data_type(dtype: str) -> DeviceDataType:
         return DeviceDataType.BF16
 
     # This should resolve to a real data type earlier, but somehow it doesn't.
+    # We make the assumption that 'auto' will be BF16.
     if dtype == "auto":
         return DeviceDataType.BF16
     raise RuntimeError(f"Unsupported dtype: {dtype}")
@@ -242,6 +246,8 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 
 class TkeImpl(AttentionImpl):
 
+    rotary_embedding: RotaryEmbedding
+
     def __init__(
         self,
         num_heads: int,
@@ -260,7 +266,7 @@ class TkeImpl(AttentionImpl):
         speculative_decoding_config: Optional[SpeculativeConfig] = None,
         scheduler_config: Optional[SchedulerConfig] = None,
     ) -> None:
-        global _WORKSPACE, _ROTARY_COS_SIN_CACHES, _MULTI_BLOCK_SEMAPHORES
+        global _WORKSPACE, _ROPE_COEFF_CACHE, _MULTI_BLOCK_SEMAPHORES
 
         if rotary_embedding_config is None:
             raise RuntimeError(
@@ -277,18 +283,26 @@ class TkeImpl(AttentionImpl):
 
         kv_cache_device_data_type = _str_to_device_data_type(kv_cache_dtype)
 
+        if kv_cache_device_data_type == DeviceDataType.FP8_E4M3 and attention_layer is None:
+            raise RuntimeError(
+                "The TKE backend needs to know about the quantization configuration when using FP8."
+            )
+
         # Extract the dimensions of the attention layer.
         self.attention_layer_dimensions = AttentionLayerDimensions()
         self.attention_layer_dimensions.numQHeads = num_heads
         self.attention_layer_dimensions.numKVHeads = num_kv_heads
         self.attention_layer_dimensions.headSize = head_size
 
+        self._setup_rope(rotary_embedding_config)
+
         # Extract the configuration of the KV-cache.
         self.prefix_cache_configuration = PrefixCacheConfiguration()
         self.prefix_cache_configuration.dataType = kv_cache_device_data_type
         self.prefix_cache_configuration.numTokensPerBlock = cache_config.block_size
         self.prefix_cache_configuration.maxNumBlocksPerSequence = (
-            rotary_embedding_config.max_positions // cache_config.block_size)
+            self.rotary_embedding.rotaryEmbeddingMaxPositions //
+            cache_config.block_size)
         self.prefix_cache_configuration.blockOffsetLayout = BlockOffsetLayout.VLLM
 
         # Internal quantity used to size the kv-cache TMA descriptor.
@@ -296,58 +310,8 @@ class TkeImpl(AttentionImpl):
         # I couldn't find a way to access the actual size of the kv-cache at this time. The 'num_blocks' on the kv-cache config is not set at this point.
         self.prefix_cache_configuration.maxNumSequences = 8192
 
-        # Extract RoPE configuration.
-        self.rotary_embedding = RotaryEmbedding()
-        self.rotary_embedding.rotaryEmbeddingBase = rotary_embedding_config.base
-        self.rotary_embedding.rotaryEmbeddingMaxPositions = rotary_embedding_config.max_positions
-        self.rotary_embedding.rotaryEmbeddingDim = rotary_embedding_config.dimension
-        self.rotary_embedding.rotaryEmbeddingScale = 1.0  # TODO: for now only support no scaling.
-        self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE  # TODO: ditto.
-        self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX  # TODO: only support GPT_NEOX for now.
-
-        # Create cache key for rotary cos/sin tensor
-        cache_key = (
-            self.rotary_embedding.rotaryEmbeddingMaxPositions,
-            self.rotary_embedding.rotaryEmbeddingDim,
-            self.rotary_embedding.rotaryEmbeddingBase,
-            self.rotary_embedding.rotaryEmbeddingScale,
-            self.rotary_embedding.rotaryScalingType,
-        )
-
-        # Check if we already have the rotary cos/sin tensor in cache
-        if cache_key in _ROTARY_COS_SIN_CACHES:
-            self.rotary_cos_sin = _ROTARY_COS_SIN_CACHES[cache_key]
-        else:
-            _, self.rotary_cos_sin_ndarray = (
-                create_sinusoidal_positions_for_attention_plugin(
-                    self.rotary_embedding.rotaryEmbeddingMaxPositions,
-                    self.rotary_embedding.rotaryEmbeddingDim,
-                    self.rotary_embedding.rotaryEmbeddingBase,
-                    self.rotary_embedding.rotaryEmbeddingScale,
-                    self.rotary_embedding.rotaryScalingType,
-                ))
-            self.rotary_cos_sin = torch.tensor(
-                self.rotary_cos_sin_ndarray,
-                dtype=torch.float32,
-                device="cuda",
-                requires_grad=False,
-            ).contiguous()
-            # Cache the tensor for future use
-            _ROTARY_COS_SIN_CACHES[cache_key] = self.rotary_cos_sin
-        self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
-        )
-
         # FIXME: should be moved to forward().
         self.output_scaling_factor = torch.tensor(
-            [1.0],
-            dtype=torch.float32,
-            device=torch.device("cuda"),
-            requires_grad=False,
-        )
-
-        # NOTE: According to modelopt team, 1.0 is almost always the optimal value.
-        # TODO: There should also be the equivalent dequantization factor. Add support for that.
-        self.kv_cache_dequantization_factor = torch.tensor(
             [1.0],
             dtype=torch.float32,
             device=torch.device("cuda"),
@@ -378,14 +342,10 @@ class TkeImpl(AttentionImpl):
             outputDataType=kv_cache_device_data_type,
             attentionLayerDimensions=self.attention_layer_dimensions,
             prefixCacheConfiguration=self.prefix_cache_configuration,
-            qScaling=
-            1.0,  # TODO: seems to be 1.0 most of the time, still, set correctly ultimately.
-            maxAttentionWindowSize=rotary_embedding_config.
-            max_positions,  # TODO: set correctly.
-            cyclicAttentionWindowSize=rotary_embedding_config.
-            max_positions,  # TODO: set correctly.
-            outputScalingFactor=self.output_scaling_factor,
-            kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
+            maxAttentionWindowSize=self.rotary_embedding.
+            rotaryEmbeddingMaxPositions,
+            cyclicAttentionWindowSize=self.rotary_embedding.
+            rotaryEmbeddingMaxPositions,
             multiBlockSemaphores=self.multi_block_semaphores,
             enableMultiTokenGeneration=speculative_decoding_config is not None,
             xqaEnabled=self.xqa_enabled,
@@ -426,6 +386,83 @@ class TkeImpl(AttentionImpl):
             raise NotImplementedError(
                 "Encoder self-attention is not implemented for TKE.")
 
+        # A dummy output scale in case it is not provided to forward().
+        self.dummy_output_scale = torch.tensor([1.0],
+                                               dtype=torch.float32,
+                                               device="cuda")
+
+    def _setup_rope(self,
+                    rotary_embedding_config: RotaryEmbeddingConfig) -> None:
+
+        # Create cache key for rotary cos/sin tensor. Crucially, frozen dataclass, which is hashable.
+        cache_key = rotary_embedding_config
+        self.rotary_embedding = RotaryEmbedding()
+
+        match rotary_embedding_config:
+            case SimpleRotaryEmbedding() as simple_rope:
+                self.rotary_embedding.rotaryEmbeddingBase = simple_rope.base
+                self.rotary_embedding.rotaryEmbeddingMaxPositions = simple_rope.max_positions
+                self.rotary_embedding.rotaryEmbeddingDim = simple_rope.dimension
+                self.rotary_embedding.rotaryEmbeddingScale = 1.0
+                self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE
+                self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
+
+                if cache_key in _ROPE_COEFF_CACHE:
+                    self.rotary_cos_sin = _ROPE_COEFF_CACHE[cache_key]
+                else:
+                    self.rotary_cos_sin_ndarray = (
+                        create_rope_coefficient_cache_for_simple_rope(
+                            self.rotary_embedding.rotaryEmbeddingMaxPositions,
+                            self.rotary_embedding.rotaryEmbeddingDim,
+                            self.rotary_embedding.rotaryEmbeddingBase,
+                        ))
+                    self.rotary_cos_sin = torch.tensor(
+                        self.rotary_cos_sin_ndarray,
+                        dtype=torch.float32,
+                        device="cuda",
+                        requires_grad=False,
+                    )
+                    _ROPE_COEFF_CACHE[cache_key] = self.rotary_cos_sin
+                self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
+                )
+            case YarnRotaryEmbeddingConfig() as yarn_rope:
+                self.rotary_embedding.rotaryEmbeddingBase = yarn_rope.rotary_embedding_config.base
+                self.rotary_embedding.rotaryEmbeddingMaxPositions = yarn_rope.yarn_scaling_config.extended_max_positions
+                self.rotary_embedding.rotaryEmbeddingDim = yarn_rope.rotary_embedding_config.dimension
+                self.rotary_embedding.rotaryEmbeddingScale = yarn_rope.yarn_scaling_config.scaling_factor
+                self.rotary_embedding.rotaryScalingType = RotaryScalingType.YARN
+                self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
+
+                if cache_key in _ROPE_COEFF_CACHE:
+                    self.rotary_cos_sin = _ROPE_COEFF_CACHE[cache_key]
+                else:
+                    self.rotary_cos_sin_ndarray = (
+                        create_sinusoidal_positions_yarn(
+                            yarn_rope.yarn_scaling_config.
+                            extended_max_positions,
+                            yarn_rope.rotary_embedding_config.dimension,
+                            yarn_rope.rotary_embedding_config.base,
+                            yarn_rope.yarn_scaling_config.scaling_factor,
+                            original_max_position_embeddings=yarn_rope.
+                            rotary_embedding_config.max_positions,
+                            beta_fast=yarn_rope.yarn_scaling_config.beta_fast,
+                            beta_slow=yarn_rope.yarn_scaling_config.beta_slow,
+                        ))
+                    self.rotary_cos_sin = torch.tensor(
+                        self.rotary_cos_sin_ndarray,
+                        dtype=torch.float32,
+                        device="cuda",
+                        requires_grad=False,
+                    )
+                    print(f"self.rotary_cos_sin: {self.rotary_cos_sin}")
+                    _ROPE_COEFF_CACHE[cache_key] = self.rotary_cos_sin
+                self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
+                )
+            case _:
+                raise NotImplementedError(
+                    f"The TKE backend does not support RoPE configured with a {type(rotary_embedding_config)}"
+                )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -454,6 +491,17 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
+        # FIXME: ".item" is going to be extremely slow.
+        attention_layer_parameters = AttentionLayerParameters()
+        attention_layer_parameters.qScale = layer._q_scale.item()
+        attention_layer_parameters.outputScalingFactorDevice = self.dummy_output_scale.data_ptr(
+        )
+        attention_layer_parameters.outputScalingFactorHost = 1.0
+        attention_layer_parameters.kScaleDevice = layer._k_scale.data_ptr()
+        attention_layer_parameters.kScale = layer._k_scale_float
+        attention_layer_parameters.vScaleDevice = layer._v_scale.data_ptr()
+        attention_layer_parameters.vScale = layer._v_scale_float
+
         # NOTE: we have removed all calls to tensor slicing and viewing from this function intentionally, at the cost of making the API of TKE a bit more complex.
         cuda_stream = current_stream()
 
@@ -473,6 +521,7 @@ class TkeImpl(AttentionImpl):
                 kvCacheBlockOffsets=attn_metadata.context_block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
+                attentionLayerParameters=attention_layer_parameters,
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
@@ -496,6 +545,7 @@ class TkeImpl(AttentionImpl):
                 block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
+                attentionLayerParameters=attention_layer_parameters,
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
@@ -504,50 +554,13 @@ class TkeImpl(AttentionImpl):
         return output
 
 
-def apply_llama3_scaling(inv_freqs: np.ndarray, rope_scaling_config: dict):
-    scale_factor = rope_scaling_config.get("factor", 8.0)
-    low_freq_factor = rope_scaling_config.get("low_freq_factor", 1.0)
-    high_freq_factor = rope_scaling_config.get("high_freq_factor", 4.0)
-    old_context_len = rope_scaling_config.get(
-        "original_max_position_embeddings", 8192)
-
-    low_freq_wavelen = old_context_len / low_freq_factor
-    high_freq_wavelen = old_context_len / high_freq_factor
-    new_inv_freqs = []
-    for inv_freq in inv_freqs:
-        wavelen = 2 * math.pi / inv_freq
-        if wavelen < high_freq_wavelen:
-            new_inv_freqs.append(inv_freq)
-        elif wavelen > low_freq_wavelen:
-            new_inv_freqs.append(inv_freq / scale_factor)
-        else:
-            assert low_freq_wavelen != high_freq_wavelen
-            smooth = (old_context_len / wavelen -
-                      low_freq_factor) / (high_freq_factor - low_freq_factor)
-            new_inv_freqs.append((1 - smooth) * inv_freq / scale_factor +
-                                 smooth * inv_freq)
-    return np.array(new_inv_freqs, dtype=inv_freqs.dtype)
-
-
-def create_sinusoidal_positions_for_attention_plugin(
+def create_rope_coefficient_cache_for_simple_rope(
     num_pos: int,
     dim: int,
     theta: float,
-    scale: float,
-    scale_type: RotaryScalingType,
-    # Other scaling configs that only used by certain scaling types.
-    rope_scaling_config: Optional[dict] = None,
     dtype=np.float32,
-) -> tuple[np.ndarray, np.ndarray]:
-    if scale_type == RotaryScalingType.LINEAR:
-        scale = 1.0 / scale
-    if scale_type == RotaryScalingType.LLAMA3:
-        assert rope_scaling_config is not None, (
-            "rotary_scaling config must be provided.")
-        inv_freq = 1.0 / (theta**(np.arange(0, dim, 2) / dim)).astype(dtype)
-        inv_freq = apply_llama3_scaling(inv_freq, rope_scaling_config)
-    else:
-        inv_freq = scale / (theta**(np.arange(0, dim, 2) / dim)).astype(dtype)
+) -> np.ndarray:
+    inv_freq = 1.0 / (theta**(np.arange(0, dim, 2) / dim)).astype(dtype)
     sinusoid_inp = np.expand_dims(
         np.einsum(
             "i , j -> i j",
@@ -558,8 +571,75 @@ def create_sinusoidal_positions_for_attention_plugin(
         axis=-1,
     )
     # fuse cos/sin into float2 (cos, sin).
-    concat = np.concatenate(
-        (np.cos(sinusoid_inp), np.sin(sinusoid_inp)),
-        axis=-1)  # np.cos(sinusoid_inp).shape = (32768, 64, 1)
+    concat = np.concatenate((np.cos(sinusoid_inp), np.sin(sinusoid_inp)),
+                            axis=-1)
 
-    return inv_freq, concat.astype(dtype).reshape(num_pos, dim)
+    return concat.astype(dtype).reshape(num_pos, dim)
+
+
+# Below is copied from TensorRT-LLM and trimmed a bit.
+def create_sinusoidal_positions_yarn(
+        num_pos: int,
+        dim: int,
+        base: float = 10000,
+        scaling_factor: float = 1.0,
+        original_max_position_embeddings: int = 4096,
+        beta_fast: float = 32,
+        beta_slow: float = 1,
+        dtype=torch.float32) -> np.ndarray:
+
+    # Copy from https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/modeling_deepseek.py
+    # Inverse dim formula to find dim based on number of rotations
+    def yarn_find_correction_dim(num_rotations, dim, base,
+                                 max_position_embeddings):
+        return (dim *
+                math.log(max_position_embeddings /
+                         (num_rotations * 2 * math.pi))) / (2 * math.log(base))
+
+    # Find dim range bounds based on rotations
+    def yarn_find_correction_range(low_rot, high_rot, dim, base,
+                                   max_position_embeddings):
+        low = math.floor(
+            yarn_find_correction_dim(low_rot, dim, base,
+                                     max_position_embeddings))
+        high = math.ceil(
+            yarn_find_correction_dim(high_rot, dim, base,
+                                     max_position_embeddings))
+        if low < 0:
+            low = 0
+        if high > dim - 1:
+            high = dim - 1
+        return low, high  # Clamp values just in case
+
+    def yarn_linear_ramp_mask(min, max, dim):
+        if min == max:
+            max += 0.001  # Prevent singularity
+
+        linear_func = (torch.arange(dim, dtype=dtype, device="cpu") -
+                       min) / (max - min)
+        ramp_func = torch.clamp(linear_func, 0, 1)
+        return ramp_func
+
+    pos_freqs = base**(torch.arange(0, dim, 2, dtype=dtype, device="cpu") /
+                       dim)
+    freq_extra = 1.0 / pos_freqs
+    freq_inter = 1.0 / (scaling_factor * pos_freqs)
+
+    low, high = yarn_find_correction_range(
+        beta_fast,
+        beta_slow,
+        dim,
+        base,
+        original_max_position_embeddings,
+    )
+    inv_freq_mask = (1 - yarn_linear_ramp_mask(low, high, dim // 2))
+    inv_freq = freq_inter * (1 - inv_freq_mask) + freq_extra * inv_freq_mask
+    t = torch.arange(num_pos, dtype=dtype, device="cpu")
+    sinusoid_inp = torch.einsum("i,j -> ij", t, inv_freq).unsqueeze(-1)
+
+    _mscale = float(yarn_get_mscale(scaling_factor))
+
+    concat = torch.cat(
+        (torch.cos(sinusoid_inp) * _mscale, torch.sin(sinusoid_inp) * _mscale),
+        dim=-1)
+    return concat.reshape((1, -1)).to(dtype).numpy()
