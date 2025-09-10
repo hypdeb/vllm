@@ -242,7 +242,7 @@ class LlamaAttention(nn.Module):
         self.backend_applies_rotary_embedding = self.attn.attn_backend.get_backend_applies_rotary_embedding(
         )
 
-        if True or not self.backend_applies_rotary_embedding:
+        if not self.backend_applies_rotary_embedding:
             self._init_rotary_emb(config,
                                   rope_scaling=rope_scaling,
                                   quant_config=quant_config)

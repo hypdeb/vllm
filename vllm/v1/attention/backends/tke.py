@@ -10,11 +10,11 @@ from typing import Optional
 
 import numpy as np
 import torch
-from py_tke import (AttentionLayerDimensions, InputScales, BlockOffsetLayout,
-                    DeviceDataType, PrefixCacheConfiguration, RotaryEmbedding,
-                    RotaryPositionalEmbeddingType, RotaryScalingType,
-                    calculate_workspace_size, create_op, run_context_inplace,
-                    run_generation_inplace)
+from py_tke import (AttentionLayerDimensions, BlockOffsetLayout,
+                    DeviceDataType, InputScales, PrefixCacheConfiguration,
+                    RotaryEmbedding, RotaryPositionalEmbeddingType,
+                    RotaryScalingType, calculate_workspace_size, create_op,
+                    run_context_inplace, run_generation_inplace)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType,
@@ -246,6 +246,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
 class TkeImpl(AttentionImpl):
 
     rotary_embedding: RotaryEmbedding
+    input_scales: Optional[InputScales] = None
 
     def __init__(
         self,
@@ -472,13 +473,15 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
-        input_scales = InputScales()
-        input_scales.qScale = layer._q_scale_float
-        input_scales.qScaleDevice = layer._q_scale.data_ptr()
-        input_scales.kScale = layer._k_scale_float
-        input_scales.kScaleDevice = layer._k_scale.data_ptr()
-        input_scales.vScale = layer._v_scale_float
-        input_scales.vScaleDevice = layer._v_scale.data_ptr()
+        # Assuming the input scales are per-layer and don't change.
+        if self.input_scales is None:
+            self.input_scales = InputScales()
+            self.input_scales.qScale = layer._q_scale_float
+            self.input_scales.qScaleDevice = layer._q_scale.data_ptr()
+            self.input_scales.kScale = layer._k_scale_float
+            self.input_scales.kScaleDevice = layer._k_scale.data_ptr()
+            self.input_scales.vScale = layer._v_scale_float
+            self.input_scales.vScaleDevice = layer._v_scale.data_ptr()
 
         # NOTE: we have removed all calls to tensor slicing and viewing from this function intentionally, at the cost of making the API of TKE a bit more complex.
         cuda_stream = current_stream()
@@ -499,7 +502,7 @@ class TkeImpl(AttentionImpl):
                 kvCacheBlockOffsets=attn_metadata.context_block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
-                inputScales=input_scales,
+                inputScales=self.input_scales,
                 outputScalingFactor=self.dummy_output_scale.data_ptr(),
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
@@ -524,7 +527,7 @@ class TkeImpl(AttentionImpl):
                 block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
-                inputScales=input_scales,
+                inputScales=self.input_scales,
                 outputScalingFactor=self.dummy_output_scale.data_ptr(),
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
