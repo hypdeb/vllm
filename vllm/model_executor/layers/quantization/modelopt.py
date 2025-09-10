@@ -257,11 +257,13 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(input=x,
-                                     weight=layer.weight,
-                                     weight_scale=layer.weight_scale,
-                                     input_scale=layer.input_scale,
-                                     bias=bias)
+        return self.fp8_linear.apply(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            input_scale=layer.input_scale,
+            bias=bias,
+            out_dtype=self.quant_config.get_supported_act_dtypes()[0])
 
 
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):

@@ -17,7 +17,7 @@ from flashinfer.utils import FP4Tensor
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionType)
+                                              AttentionType, InputLayout)
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -119,6 +119,18 @@ class FlashInferBackend(AttentionBackend):
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
+
 
 @dataclass
 class FlashInferMetadata:
@@ -159,7 +171,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    def reorder_batch_threshold(self) -> Optional[int]:
+        return 1
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):

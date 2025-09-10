@@ -32,6 +32,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionType
+from vllm.attention.layer import InputLayout
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -44,6 +45,9 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.config import (
+    RotaryEmbeddingConfig, SimpleRotaryEmbedding, YarnRotaryEmbeddingConfig,
+    YarnScalingConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -96,6 +100,49 @@ class LlamaMLP(nn.Module):
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
+
+
+def _parse_rope_config(
+    rope_theta: float,
+    rope_dimension: int,
+    max_position_embeddings,
+    rope_scaling: Optional[dict[str, Any]] = None,
+) -> RotaryEmbeddingConfig:
+    if rope_scaling is None or rope_scaling["rope_type"] is None:
+        rope_config = SimpleRotaryEmbedding(
+            base=rope_theta,
+            max_positions=max_position_embeddings,
+            dimension=rope_dimension,
+        )
+        return rope_config
+    scaling_type = rope_scaling["rope_type"]
+    if scaling_type == "yarn":
+        scaling_factor = rope_scaling["factor"]
+        original_max_position = rope_scaling[
+            "original_max_position_embeddings"]
+        extrapolation_factor = rope_scaling.get("extrapolation_factor", None)
+        attn_factor = rope_scaling.get("attn_factor", None)
+        beta_fast = rope_scaling["beta_fast"]
+        beta_slow = rope_scaling["beta_slow"]
+        rope = SimpleRotaryEmbedding(
+            base=rope_theta,
+            max_positions=original_max_position,
+            dimension=rope_dimension,
+        )
+        return YarnRotaryEmbeddingConfig(
+            rotary_embedding_config=rope,
+            yarn_scaling_config=YarnScalingConfig(
+                extended_max_positions=int(original_max_position *
+                                           scaling_factor),
+                extrapolation_factor=extrapolation_factor,
+                attn_factor=attn_factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+                scaling_factor=scaling_factor,
+            ),
+        )
+    raise NotImplementedError(
+        f"The RoPE scaling type {scaling_type} is not supported yet.")
 
 
 class LlamaAttention(nn.Module):
@@ -165,10 +212,6 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self._init_rotary_emb(config,
-                              rope_scaling=rope_scaling,
-                              quant_config=quant_config)
-
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
             is_sliding = layer_types[layer_idx] == "sliding_attention"
@@ -178,6 +221,8 @@ class LlamaAttention(nn.Module):
         attn_cls = (EncoderOnlyAttention
                     if attn_type == AttentionType.ENCODER_ONLY else Attention)
 
+        rope_config = _parse_rope_config(rope_theta, head_dim,
+                                         max_position_embeddings, rope_scaling)
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -188,7 +233,19 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
+
+            # Extra config required by some backends.
+            rope_config=rope_config,
         )
+
+        self.input_layout = self.attn.attn_backend.get_input_layout()
+        self.backend_applies_rotary_embedding = self.attn.attn_backend.get_backend_applies_rotary_embedding(
+        )
+
+        if not self.backend_applies_rotary_embedding:
+            self._init_rotary_emb(config,
+                                  rope_scaling=rope_scaling,
+                                  quant_config=quant_config)
 
     def forward(
         self,
@@ -196,15 +253,27 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        match (self.input_layout, self.backend_applies_rotary_embedding):
+            case (InputLayout.SPLIT_QKV, False):
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                    dim=-1)
+                q, k = self.rotary_emb(positions, q, k)
+                attn_output = self.attn(q, k, v)
+            case (InputLayout.CONTIGUOUS_QKV, True):
+                attn_output = self.attn(qkv, None, None)
+            case _:
+                raise ValueError(
+                    f"Invalid attention specifications: input_layout={self.input_layout}, backend_applies_rotary_embedding={self.backend_applies_rotary_embedding}"
+                )
         output, _ = self.o_proj(attn_output)
         return output
 
-    def _init_rotary_emb(self, config: LlamaConfig,
-                         rope_scaling: Optional[dict[str, Any]],
-                         quant_config: Optional[QuantizationConfig]) -> None:
+    def _init_rotary_emb(
+        self,
+        config: LlamaConfig,
+        rope_scaling: Optional[dict[str, Any]],
+        quant_config: Optional[QuantizationConfig],
+    ) -> None:
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
         if is_gguf and config.model_type == "llama":

@@ -270,13 +270,20 @@ class CudaPlatformBase(Platform):
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
             TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
             XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
+            TKE_V1 = "vllm.v1.attention.backends.tke.TkeAttentionBackend"  # noqa: E501
 
+            if selected_backend == _Backend.TKE:
+                logger.info_once("Using TKE backend on V1 engine.")
+                return TKE_V1
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
                 if cls.has_device_capability(100):
                     from vllm.v1.attention.backends.utils import (
                         set_kv_cache_layout)
                     set_kv_cache_layout("HND")
+                return FLASHINFER_V1
+            if selected_backend == _Backend.FLASHINFER_VLLM_V1:
+                logger.info_once("Using FlashInfer backend on V1 engine.")
                 return FLASHINFER_V1
             elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
@@ -293,6 +300,9 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.XFORMERS_VLLM_V1:
                 logger.info_once("Using XFormers backend on V1 engine.")
                 return XFORMERS_V1
+            elif selected_backend == _Backend.FLASH_ATTN_VLLM_V1:
+                logger.info_once("Using Flash Attention backend on V1 engine.")
+                return FLASH_ATTN_V1
 
             from vllm.attention.selector import is_attn_backend_supported
 
@@ -365,7 +375,7 @@ class CudaPlatformBase(Platform):
             pass
         elif selected_backend:
             raise ValueError(
-                f"Invalid attention backend for {cls.device_name}, "
+                f"Invalid attention backend '{selected_backend}' for {cls.device_name}, "
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
@@ -510,8 +520,12 @@ class CudaPlatformBase(Platform):
             if attention_backend is None:
                 attention_backend = "FLASH_ATTN_VLLM_V1"
 
+            # TKE supports fp8 kv-cache dtype.
+            if attention_backend == "TKE":
+                supported = True
+
             # All Blackwell backends support fp8
-            if cls.is_device_capability(100):
+            elif cls.is_device_capability(100):
                 supported = True
             elif attention_backend == "FLASH_ATTN_VLLM_V1":
                 if fp8_attention:
