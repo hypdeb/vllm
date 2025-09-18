@@ -11,9 +11,18 @@ FLASH_ATTN_FLAGS := $(LONG_MODEL_FLAG) VLLM_ATTENTION_BACKEND=FLASH_ATTN_VLLM_V1
 TKE_FLAGS := $(LONG_MODEL_FLAG) VLLM_ATTENTION_BACKEND=TKE
 FLASH_INFER_FLAGS := $(LONG_MODEL_FLAG) VLLM_ATTENTION_BACKEND=FLASHINFER_VLLM_V1
 
+benchmark-latency: INPUT_LEN := 32000
+benchmark-latency: NUM_ITERS_WARMUP := 1
+benchmark-latency: BATCH_SIZE := 1
+benchmark-latency: NUM_ITERS := 5
+TKE_BACKEND := TKE
+FLASH_BACKEND := FLASH_ATTN_VLLM_V1
+
+CURR_BACKEND = $(TKE_BACKEND)
+
 NSYS_PROFILE ?= 0
 ifeq ($(NSYS_PROFILE), 1)
-	NSYS_PROFILE_CMD := VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile -t cuda,nvtx,python-gil --python-sampling true -o ${OUTPUT_PATH}/vllm-sample-profile-tke.nsys-rep --trace-fork-before-exec true --cuda-graph-trace node -f true
+	NSYS_PROFILE_CMD := VLLM_WORKER_MULTIPROC_METHOD=spawn /usr/local/bin/nsys profile --python-sampling true -o ${OUTPUT_PATH}/v3_$(CURR_BACKEND)_new_branch_5_iters_30k_isl.nsys-rep --trace-fork-before-exec true --cuda-graph-trace node -f true
 else
 	NSYS_PROFILE_CMD :=
 endif
@@ -21,8 +30,13 @@ endif
 build-vllm-image:
 	$(call add_local_user,flashinfer_vllm_dev:7204195724929729558)
 
+AAAAAA:
+	nsys stats --force-export=true --timeunit milliseconds old_branch_5_iters_30k_isl_graph.nsys-rep  > old_branch_5_iters_30k_isl_graph.txt
+	nsys stats --force-export=true --timeunit milliseconds old_branch_5_iters_30k_isl_eager.nsys-rep  > old_branch_5_iters_30k_isl_eager.txt
+	nsys stats --force-export=true --timeunit milliseconds new_branch_5_iters_30k_isl_graph.nsys-rep  > new_branch_5_iters_30k_isl_graph.txt
+	nsys stats --force-export=true --timeunit milliseconds new_branch_5_iters_30k_isl_eager.nsys-rep  > new_branch_5_iters_30k_isl_eager.txt
 vllm-setup:
-	VLLM_USE_PRECOMPILED=1 pip install --editable .[bench]
+	pip install --editable .[bench]
 	# pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
 vllm-cpp-rebuild:
@@ -93,18 +107,13 @@ run-base-vllm:
 trt-llm-setup:
 	python scripts/build_wheel.py --use_ccache -p -a native
 
-benchmark-latency: TKE_BACKEND := TKE
-benchmark-latency: FLASH_BACKEND := FLASH_ATTN
-benchmark-latency: INPUT_LEN := 80000
-benchmark-latency: NUM_ITERS_WARMUP := 1
-benchmark-latency: BATCH_SIZE := 1
-benchmark-latency: NUM_ITERS := 25
+
 
 # Note: we need VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 and to specify the max model length explicitly because vLLM reads the max model length from the tokenizer for some reason.
 # It is unclear why the tokenizer would need to know the max model length at all, even less clear why this would be the source of truth for model length.
 # I guess there is some explanation for this, but I am clueless at this time.
 benchmark-latency:
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=$(TKE_BACKEND) $(NSYS_PROFILE_CMD) python benchmarks/benchmark_latency.py \
+	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=$(CURR_BACKEND) $(NSYS_PROFILE_CMD) python benchmarks/benchmark_latency.py \
 		--model $(MODEL_PATH) \
 		--tensor-parallel-size $(TP_SIZE) \
 		--quantization modelopt \
@@ -112,18 +121,9 @@ benchmark-latency:
 		--num-iters-warmup $(NUM_ITERS_WARMUP) \
 		--batch-size $(BATCH_SIZE) \
 		--num-iters $(NUM_ITERS) \
-		--kv-cache-dtype fp8 \
-		--enforce-eager
-	# VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 LLM_ATTENTION_BACKEND=$(FLASH_BACKEND) $(NSYS_PROFILE_CMD) python benchmarks/benchmark_latency.py \
-	# 	--model $(MODEL_PATH) \
-	# 	--tensor-parallel-size $(TP_SIZE) \
-	# 	--quantization modelopt \
-	# 	--input-len $(INPUT_LEN) \
-	# 	--num-iters-warmup $(NUM_ITERS_WARMUP) \
-	# 	--batch-size $(BATCH_SIZE) \
-	# 	--num-iters $(NUM_ITERS) \
-	# 	--kv-cache-dtype fp8 \
-	# 	--enforce-eager
+		--kv-cache-dtype fp8
+
+
 
 ###########################################################################################
 ######################## Utilities ########################################################
