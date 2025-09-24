@@ -343,7 +343,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
 
-            return output.view(-1, q_dimension)
+            return output.view(-1, q_dimension).to(torch.bfloat16)
 
         else:
             if self.use_direct_call:
