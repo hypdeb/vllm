@@ -266,6 +266,12 @@ class TkeImpl(AttentionImpl):
         speculative_decoding_config: Optional[SpeculativeConfig] = None,
         scheduler_config: Optional[SchedulerConfig] = None,
     ) -> None:
+
+        # A dummy output scale in case it is not provided to forward().
+        self.dummy_scale = torch.tensor([1.0],
+                                               dtype=torch.float32,
+                                               device="cuda")
+
         global _WORKSPACE, _ROPE_COEFF_CACHE, _MULTI_BLOCK_SEMAPHORES
 
         if rotary_embedding_config is None:
@@ -282,6 +288,16 @@ class TkeImpl(AttentionImpl):
             )
 
         kv_cache_device_data_type = _str_to_device_data_type(kv_cache_dtype)
+
+        # FIXME: handle this in TKE instead.
+        if kv_cache_device_data_type == DeviceDataType.BF16:
+            self.input_scales = InputScales()
+            self.input_scales.qScale = 1.0
+            self.input_scales.qScaleDevice = self.dummy_scale.data_ptr()
+            self.input_scales.kScale = 1.0
+            self.input_scales.kScaleDevice = self.dummy_scale.data_ptr()
+            self.input_scales.vScale = 1.0
+            self.input_scales.vScaleDevice = self.dummy_scale.data_ptr()
 
         # Extract the dimensions of the attention layer.
         self.attention_layer_dimensions = AttentionLayerDimensions()
@@ -368,11 +384,6 @@ class TkeImpl(AttentionImpl):
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
                 "Encoder self-attention is not implemented for TKE.")
-
-        # A dummy output scale in case it is not provided to forward().
-        self.dummy_output_scale = torch.tensor([1.0],
-                                               dtype=torch.float32,
-                                               device="cuda")
 
     def _setup_rope(self,
                     rotary_embedding_config: RotaryEmbeddingConfig) -> None:
@@ -503,7 +514,7 @@ class TkeImpl(AttentionImpl):
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
                 inputScales=self.input_scales,
-                outputScalingFactor=self.dummy_output_scale.data_ptr(),
+                outputScalingFactor=self.dummy_scale.data_ptr(),
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
@@ -528,7 +539,7 @@ class TkeImpl(AttentionImpl):
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
                 inputScales=self.input_scales,
-                outputScalingFactor=self.dummy_output_scale.data_ptr(),
+                outputScalingFactor=self.dummy_scale.data_ptr(),
                 outputPtr=output.data_ptr(),
                 workspace=self.workspace,
                 stream=cuda_stream.cuda_stream,
