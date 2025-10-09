@@ -11,15 +11,6 @@ import uuid
 # Set environment variable for insecure serialization
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-BACKEND_DIR_FORMAT = "/scratch/usr/z_hacky_layer_test/captures/{output_dir}"
-VARIANT_DIR_FORMAT = BACKEND_DIR_FORMAT + "/{variant}"
-
-SEQLEN_DIR_FORMAT = VARIANT_DIR_FORMAT + "/seq_len_{seq_len}"
-PASS_DIR_FORMAT = SEQLEN_DIR_FORMAT + "/pass_{current_pass_count}"
-
-LOG_PRE_FORWARD_HOOK = False
-LOG_KV_CACHE = False
-
 # Use a class to ensure the same object reference is maintained
 class GlobalState:
     def __init__(self):
