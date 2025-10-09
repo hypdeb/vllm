@@ -287,10 +287,10 @@ class TkeImpl(AttentionImpl):
                 "The TKE backend needs to know about the scheduler configuration."
             )
 
-        kv_cache_device_data_type = _str_to_device_data_type(kv_cache_dtype)
+        self.kv_cache_device_data_type = _str_to_device_data_type(kv_cache_dtype)
 
         # FIXME: handle this in TKE instead.
-        if kv_cache_device_data_type == DeviceDataType.BF16:
+        if self.kv_cache_device_data_type == DeviceDataType.BF16:
             self.input_scales = InputScales()
             self.input_scales.qScale = 1.0
             self.input_scales.qScaleDevice = self.dummy_scale.data_ptr()
@@ -309,7 +309,7 @@ class TkeImpl(AttentionImpl):
 
         # Extract the configuration of the KV-cache.
         self.prefix_cache_configuration = PrefixCacheConfiguration()
-        self.prefix_cache_configuration.dataType = kv_cache_device_data_type
+        self.prefix_cache_configuration.dataType = self.kv_cache_device_data_type
         self.prefix_cache_configuration.numTokensPerBlock = cache_config.block_size
         self.prefix_cache_configuration.maxNumBlocksPerSequence = (
             self.rotary_embedding.rotaryEmbeddingMaxPositions //
@@ -323,7 +323,7 @@ class TkeImpl(AttentionImpl):
 
         # NOTE: XQA BF16 is not enabled yet, meaning that for BF16 attention, we always use FMHA_V2.
         self.xqa_enabled = (
-            kv_cache_device_data_type == DeviceDataType.FP8_E4M3)
+            self.kv_cache_device_data_type == DeviceDataType.FP8_E4M3)
 
         # An internal buffer used by the XQA kernel. Needs to be initialized to 0.
         # This is the reason why it is handled separately, instead of as part of the workspace,
@@ -342,7 +342,7 @@ class TkeImpl(AttentionImpl):
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
             inputDataType=DeviceDataType.BF16,
-            outputDataType=kv_cache_device_data_type,
+            outputDataType=self.kv_cache_device_data_type,
             attentionLayerDimensions=self.attention_layer_dimensions,
             prefixCacheConfiguration=self.prefix_cache_configuration,
             multiBlockSemaphores=self.multi_block_semaphores,
@@ -484,8 +484,34 @@ class TkeImpl(AttentionImpl):
         if attn_metadata is None:
             return output
 
-        # Assuming the input scales are per-layer and don't change.
-        if self.input_scales is None:
+        # Experimentally attempt to recompute the input scales on the fly.
+        dynamic_input_scales = True
+        if self.kv_cache_device_data_type == DeviceDataType.FP8_E4M3 and dynamic_input_scales:
+            self.input_scales = InputScales()
+
+            q_dimension = self.head_size * self.num_heads
+            q = query[:, :q_dimension]
+            max_q = torch.abs(q).max()
+            self.input_scales.qScale = max_q
+            layer._q_scale[0] = max_q
+            self.input_scales.qScaleDevice = layer._q_scale.data_ptr()
+            self.input_scales.kScale = layer._k_scale_float
+
+            k_dimension = self.head_size*self.num_kv_heads
+            k = query[:, q_dimension:q_dimension+k_dimension]
+            max_k = torch.abs(k).max()
+            self.input_scales.kScale = max_k
+            layer._k_scale[0] = max_k
+            self.input_scales.kScaleDevice = layer._k_scale.data_ptr()
+
+            v_dimension = self.head_size*self.num_kv_heads
+            v = query[:, q_dimension+k_dimension:q_dimension+k_dimension+v_dimension]
+            max_v = torch.abs(v).max()
+            self.input_scales.vScale = max_v
+            layer._v_scale[0] = max_v
+            self.input_scales.vScaleDevice = layer._v_scale.data_ptr()
+        elif self.input_scales is None:
+            # Assuming the input scales are per-layer and don't change.
             self.input_scales = InputScales()
             self.input_scales.qScale = layer._q_scale_float
             self.input_scales.qScaleDevice = layer._q_scale.data_ptr()
