@@ -591,7 +591,7 @@ def get_requirements() -> list[str]:
         requirements = modified_requirements
         # Add direct dependency on TKE project for CUDA builds
         requirements.append(
-            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git#c5a6e6ddc5c3f959237641570ac13d5f79d0def7"
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@c5a6e6ddc5c3f959237641570ac13d5f79d0def7"
         )
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
@@ -702,7 +702,7 @@ setup(
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
         "tke": [
-            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git#c5a6e6ddc5c3f959237641570ac13d5f79d0def7"
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@c5a6e6ddc5c3f959237641570ac13d5f79d0def7"
         ]
     },
     cmdclass=cmdclass,
