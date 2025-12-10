@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
@@ -12,6 +13,19 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
+
+
+class InputLayout(Enum):
+    """
+    The types of query, key, value layouts for the attention operation.
+    Different implementations might require different layouts.
+    """
+
+    # The default vLLM attention input layout where the query, keys and values are provided separately as tensors of dimensions [num_tokens, num_heads * head_size], [num_tokens, num_kv_heads * head_size], and [num_tokens, num_kv_heads * head_size] respectively.
+    SPLIT_QKV = "split_qkv"
+
+    # An input layout where the query, keys and values are provided as a single tensor of dimensions [num_tokens, (num_heads + 2*num_kv_heads) * head_size].
+    CONTIGUOUS_QKV = "fused_qkv"
 
 
 class AttentionType:
@@ -252,6 +266,21 @@ class AttentionBackend(ABC):
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
+
+    @staticmethod
+    @abstractmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_input_layout() -> InputLayout:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        raise NotImplementedError
 
 
 class AttentionMetadata:

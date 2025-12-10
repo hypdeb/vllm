@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionLayer,
     AttentionType,
+    InputLayout,
     is_quantized_kv_cache,
 )
 from vllm.config import VllmConfig
@@ -77,6 +78,18 @@ class CPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
+        return False
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
         return False
 
 

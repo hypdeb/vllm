@@ -306,7 +306,10 @@ async def async_request_openai_completions(
         most_recent_timestamp = st
         try:
             async with session.post(
-                url=api_url, json=payload, headers=headers
+                url=api_url,
+                json=payload,
+                headers=headers,
+                read_bufsize=1024 * 1024 * 16,
             ) as response:
                 if response.status == 200:
                     first_chunk_received = False

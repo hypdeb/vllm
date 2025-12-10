@@ -23,6 +23,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    InputLayout,
     is_quantized_kv_cache,
 )
 from vllm.config import VllmConfig
@@ -116,6 +117,18 @@ class FlexAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 
 # @torch.compile(fullgraph=True, mode="reduce-overhead")

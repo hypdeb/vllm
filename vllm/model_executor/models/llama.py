@@ -32,7 +32,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
+from vllm.attention.layer import Attention, InputLayout
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -47,6 +47,16 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbeddingBase
+from vllm.model_executor.layers.rotary_embedding.config import (
+    RotaryEmbeddingConfig,
+    SimpleRotaryEmbedding,
+    YarnRotaryEmbeddingConfig,
+    YarnScalingConfig,
+)
+from vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope import (
+    YaRNScalingRotaryEmbedding,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -110,6 +120,38 @@ class LlamaMLP(nn.Module):
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
+
+
+def _parse_rope_config(
+    rotary_embedding: RotaryEmbeddingBase,
+    rope_dimension: int,
+) -> RotaryEmbeddingConfig:
+    if isinstance(rotary_embedding, YaRNScalingRotaryEmbedding):
+        scaling_factor = rotary_embedding.scaling_factor
+        original_max_position = rotary_embedding.max_position_embeddings
+        extrapolation_factor = rotary_embedding.extrapolation_factor
+        attn_factor = rotary_embedding.attn_factor
+        beta_fast = rotary_embedding.beta_fast
+        beta_slow = rotary_embedding.beta_slow
+        rope = SimpleRotaryEmbedding(
+            base=rotary_embedding.base,
+            max_positions=original_max_position,
+            dimension=rope_dimension,
+        )
+        return YarnRotaryEmbeddingConfig(
+            rotary_embedding_config=rope,
+            yarn_scaling_config=YarnScalingConfig(
+                extended_max_positions=int(original_max_position * scaling_factor),
+                extrapolation_factor=extrapolation_factor,
+                attn_factor=attn_factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+                scaling_factor=scaling_factor,
+            ),
+        )
+    raise NotImplementedError(
+        f"The RoPE scaling type {type(rotary_embedding)} is not supported yet."
+    )
 
 
 class LlamaAttention(nn.Module):
@@ -180,8 +222,6 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self._init_rotary_emb(config, quant_config=quant_config)
-
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
             # Fix for Eagle3 compatibility:
@@ -209,6 +249,8 @@ class LlamaAttention(nn.Module):
             else Attention
         )
 
+        self._init_rotary_emb(config, quant_config=quant_config)
+        rope_config = _parse_rope_config(self.rotary_emb, head_dim)
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -219,6 +261,13 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
+            # Extra config required by some backends.
+            rope_config=rope_config,
+        )
+
+        self.input_layout = self.attn.attn_backend.get_input_layout()
+        self.backend_applies_rotary_embedding = (
+            self.attn.attn_backend.get_backend_applies_rotary_embedding()
         )
 
     def _get_llama_4_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
@@ -238,12 +287,24 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        if self.do_llama_4_scaling:
-            attn_scale = self._get_llama_4_attn_scale(positions)
-            q = (q * attn_scale).to(q.dtype)
-        attn_output = self.attn(q, k, v)
+        match (self.input_layout, self.backend_applies_rotary_embedding):
+            case (InputLayout.SPLIT_QKV, False):
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+                q, k = self.rotary_emb(positions, q, k)
+                if self.do_llama_4_scaling:
+                    attn_scale = self._get_llama_4_attn_scale(positions)
+                    q = (q * attn_scale).to(q.dtype)
+                attn_output = self.attn(q, k, v)
+            case (InputLayout.CONTIGUOUS_QKV, True):
+                if self.do_llama_4_scaling:
+                    raise ValueError(
+                        "Llama 4 scaling with backend-applied RoPE is not supported yet."
+                    )
+                attn_output = self.attn(qkv, None, None)
+            case _:
+                raise ValueError(
+                    f"Invalid attention specifications: input_layout={self.input_layout}, backend_applies_rotary_embedding={self.backend_applies_rotary_embedding}"
+                )
         output, _ = self.o_proj(attn_output)
         return output
 

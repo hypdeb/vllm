@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
+import inspect
 from collections.abc import Callable
 from typing import cast
 
@@ -13,6 +14,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionType,
+    InputLayout,
     MLAAttentionImpl,
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -33,6 +35,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.rotary_embedding.config import RotaryEmbeddingConfig
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -50,7 +53,6 @@ if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx9
 else:
     on_gfx9 = lambda *args, **kwargs: False
-
 
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
@@ -158,6 +160,11 @@ def _init_kv_cache_quant(
         layer.quant_method.create_weights(layer)
 
 
+def _constructor_has_arg(cls: type, arg_name: str) -> bool:
+    sig = inspect.signature(cls.__init__)
+    return arg_name in sig.parameters
+
+
 class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
@@ -181,6 +188,7 @@ class Attention(nn.Module, AttentionLayerBase):
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
+        rope_config: RotaryEmbeddingConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
@@ -194,7 +202,7 @@ class Attention(nn.Module, AttentionLayerBase):
         super().__init__()
         if per_layer_sliding_window is not None:
             # per-layer sliding window
-            sliding_window = per_layer_sliding_window
+            sliding_window: int | None = per_layer_sliding_window
         elif cache_config is not None:
             # model-level sliding window
             sliding_window = cache_config.sliding_window
@@ -247,6 +255,33 @@ class Attention(nn.Module, AttentionLayerBase):
             self.attn_backend = attn_backend
 
         impl_cls = self.attn_backend.get_impl_cls()
+
+        # For RoPE, we need to pass the rotary embedding config. The implementation type
+        # explicitly informs us that it is applying RoPE too.
+        if self.attn_backend.get_backend_applies_rotary_embedding():
+            if rope_config is None:
+                raise RuntimeError(
+                    "If the attention backend has fused RoPE, a rope_config must be provided."
+                )
+            extra_impl_args["rotary_embedding_config"] = rope_config
+
+        # For the cache config, we need to do some reflection to figure out
+        # whether or not to add the cache config to the extra_impl_args.
+        if _constructor_has_arg(impl_cls, "cache_config"):
+            extra_impl_args["cache_config"] = cache_config
+
+        # Same for speculative decoding.
+        if _constructor_has_arg(impl_cls, "speculative_decoding_config"):
+            extra_impl_args["speculative_decoding_config"] = (
+                get_current_vllm_config().speculative_config
+            )
+
+        # Same for scheduler config.
+        if _constructor_has_arg(impl_cls, "scheduler_config"):
+            extra_impl_args["scheduler_config"] = (
+                get_current_vllm_config().scheduler_config
+            )
+
         self.impl = impl_cls(
             num_heads,
             head_size,
@@ -326,6 +361,7 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+        q_dimension = self.head_size * self.num_heads
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
         output_dtype = query.dtype
@@ -342,18 +378,39 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
-            output_shape = output_shape if output_shape is not None else query.shape
-            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
-            hidden_size = output_shape[-1]
-            # Reshape the query, key, and value tensors.
-            # NOTE(woosuk): We do this outside the custom op to minimize the
-            # CPU overheads from the non-CUDA-graph regions.
-            query = query.view(-1, self.num_heads, self.head_size)
-            output = output.view(-1, self.num_heads, self.head_size)
-            if key is not None:
-                key = key.view(-1, self.num_kv_heads, self.head_size)
-            if value is not None:
-                value = value.view(-1, self.num_kv_heads, self.head_size)
+            if self.attn_backend.get_input_layout() == InputLayout.SPLIT_QKV:
+                output_shape = output_shape if output_shape is not None else query.shape
+                output = torch.empty(
+                    output_shape, dtype=output_dtype, device=query.device
+                )
+                hidden_size = output_shape[-1]
+                # Reshape the query, key, and value tensors.
+                # NOTE(woosuk): We do this outside the custom op to minimize the
+                # CPU overheads from the non-CUDA-graph regions.
+                query = query.view(-1, self.num_heads, self.head_size)
+                output = output.view(-1, self.num_heads, self.head_size)
+                if key is not None:
+                    key = key.view(-1, self.num_kv_heads, self.head_size)
+                if value is not None:
+                    value = value.view(-1, self.num_kv_heads, self.head_size)
+            elif self.attn_backend.get_input_layout() == InputLayout.CONTIGUOUS_QKV:
+                output_shape = (
+                    output_shape
+                    if output_shape is not None
+                    else (query.shape[0], q_dimension)
+                )
+                output = torch.zeros(
+                    output_shape,
+                    dtype=self.attn_backend.get_output_dtype(self.kv_cache_dtype),
+                    device=query.device,
+                )
+                key = None  # type: ignore
+                value = None  # type: ignore
+            else:
+                raise ValueError(
+                    f"Unsupported input layout: {self.attn_backend.get_input_layout()}"
+                )
+
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
@@ -367,7 +424,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name
                 )
-            return output.view(-1, hidden_size)
+
+            return output.view(-1, q_dimension).to(torch.bfloat16)
+
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()

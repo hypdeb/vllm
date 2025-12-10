@@ -718,6 +718,8 @@ def get_requirements() -> list[str]:
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
+        # Add direct dependency on TKE project for CUDA builds
+        requirements.append("trtllm-kernel-export @ /home/jdebache/tke")
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_tpu():
@@ -807,6 +809,7 @@ setup(
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
+        "tke": ["trtllm-kernel-export @ /home/jdebache/tke"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

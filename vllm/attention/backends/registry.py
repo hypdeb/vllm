@@ -76,6 +76,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "RocmAiterUnifiedAttentionBackend"
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    TKE = "vllm.v1.attention.backends.tke.TkeAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     CUSTOM = ""
 
@@ -193,7 +194,6 @@ MAMBA_TYPE_TO_BACKEND_MAP = {
     "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN.name,
     "custom": MambaAttentionBackendEnum.CUSTOM.name,
 }
-
 
 _ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}
 _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}

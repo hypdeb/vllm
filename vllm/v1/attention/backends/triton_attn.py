@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    InputLayout,
     MultipleOf,
 )
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
@@ -196,6 +197,18 @@ class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
         return head_size >= 32
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
     @classmethod
     def supports_sink(cls) -> bool:

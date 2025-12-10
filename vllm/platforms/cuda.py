@@ -79,6 +79,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TKE,
             ]
 
 
@@ -335,8 +336,8 @@ class CudaPlatformBase(Platform):
                     device_capability,
                     attn_type,
                 )
-            except ImportError:
-                invalid_reasons = ["ImportError"]
+            except ImportError as e:
+                raise e
             if invalid_reasons:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "

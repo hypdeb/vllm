@@ -168,6 +168,18 @@ class PallasAttentionBackend(AttentionBackend):
             return 256
         return page_size
 
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
+
 
 @dataclass
 class PallasMetadata:
