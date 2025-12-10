@@ -70,7 +70,8 @@ class TkeAttentionBackend(AttentionBackend):
         return [64, 128, 256]
 
     @classmethod
-    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+    def supports_kv_cache_dtype(cls,
+                                kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
         if kv_cache_dtype.startswith("fp8"):
@@ -99,6 +100,7 @@ class TkeAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
@@ -192,6 +194,7 @@ def _str_to_device_data_type(dtype: str) -> DeviceDataType:
 
 
 class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -200,7 +203,8 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         device: torch.device,
     ):
         # For this backend, the data type of the kv-cache determines the data type in which we perform operation.
-        self.kv_cache_device_data_type = _torch_to_device_data_type(kv_cache_spec.dtype)
+        self.kv_cache_device_data_type = _torch_to_device_data_type(
+            kv_cache_spec.dtype)
 
         self.xqa_enabled = self.kv_cache_device_data_type == DeviceDataType.FP8_E4M3
 
@@ -208,13 +212,11 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         # speculative tokens as "decode" requests and pull them to the front of the batch.
         # Also, we do not need to do any reordering if we do not use generation optimized kernels (XQA) for generation.
         if self.xqa_enabled:
-            if (
-                vllm_config.speculative_config is not None
-                and vllm_config.speculative_config.num_speculative_tokens is not None
-            ):
+            if (vllm_config.speculative_config is not None
+                    and vllm_config.speculative_config.num_speculative_tokens
+                    is not None):
                 self._reorder_batch_threshold: int | None = (
-                    vllm_config.speculative_config.num_speculative_tokens
-                )
+                    vllm_config.speculative_config.num_speculative_tokens)
             else:
                 self._reorder_batch_threshold = 1
         else:
@@ -231,50 +233,40 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
     ):
         if self.xqa_enabled:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(common_attn_metadata)
-            )
+                split_decodes_and_prefills(common_attn_metadata))
         else:
             num_decodes = 0
             num_prefills = common_attn_metadata.num_reqs
             num_decode_tokens = 0
             num_prefill_tokens = common_attn_metadata.num_actual_tokens
 
-        query_lens_cpu = (
-            common_attn_metadata.query_start_loc_cpu[1:]
-            - common_attn_metadata.query_start_loc_cpu[:-1]
-        )
-        query_lens = (
-            common_attn_metadata.query_start_loc[1:]
-            - common_attn_metadata.query_start_loc[:-1]
-        )
+        query_lens_cpu = (common_attn_metadata.query_start_loc_cpu[1:] -
+                          common_attn_metadata.query_start_loc_cpu[:-1])
+        query_lens = (common_attn_metadata.query_start_loc[1:] -
+                      common_attn_metadata.query_start_loc[:-1])
 
         context_max_sequence_length = (
             common_attn_metadata.seq_lens_cpu[num_decodes:].max().item()
-            if num_prefills > 0
-            else 0
-        )
+            if num_prefills > 0 else 0)
         generation_max_sequence_length = (
             common_attn_metadata.seq_lens_cpu[:num_decodes].max().item()
-            if num_decodes > 0
-            else 0
-        )
+            if num_decodes > 0 else 0)
         generation_max_input_sequence_length = (
-            query_lens_cpu[:num_decodes].max().item() if num_decodes > 0 else 0
-        )
+            query_lens_cpu[:num_decodes].max().item()
+            if num_decodes > 0 else 0)
 
         return TkeMetadata(
             common_attn_metadata=common_attn_metadata,
-            context_sequence_lengths_device=common_attn_metadata.seq_lens[num_decodes:],
+            context_sequence_lengths_device=common_attn_metadata.
+            seq_lens[num_decodes:],
             context_input_sequence_lengths_device=query_lens[num_decodes:],
-            context_block_table_tensor=common_attn_metadata.block_table_tensor[
-                num_decodes:
-            ],
+            context_block_table_tensor=common_attn_metadata.
+            block_table_tensor[num_decodes:],
             query_lens=query_lens,
             context_max_sequence_length=int(context_max_sequence_length),
             generation_max_sequence_length=int(generation_max_sequence_length),
             generation_max_input_sequence_length=int(
-                generation_max_input_sequence_length
-            ),
+                generation_max_input_sequence_length),
             num_context_sequences=num_prefills,
             num_context_tokens=num_prefill_tokens,
             num_generation_sequences=num_decodes,
@@ -305,17 +297,19 @@ class TkeImpl(AttentionImpl):
         scheduler_config: SchedulerConfig | None = None,
     ) -> None:
         # A dummy output scale in case it is not provided to forward().
-        self.dummy_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+        self.dummy_scale = torch.tensor([1.0],
+                                        dtype=torch.float32,
+                                        device="cuda")
 
         global _WORKSPACE, _ROPE_COEFF_CACHE, _MULTI_BLOCK_SEMAPHORES
 
         if rotary_embedding_config is None:
-            raise RuntimeError("The TKE backend needs to have a configured RoPE.")
+            raise RuntimeError(
+                "The TKE backend needs to have a configured RoPE.")
 
         if cache_config is None:
             raise RuntimeError(
-                "The TKE backend needs to know about the cache configuration."
-            )
+                "The TKE backend needs to know about the cache configuration.")
 
         if scheduler_config is None:
             raise RuntimeError(
@@ -347,8 +341,8 @@ class TkeImpl(AttentionImpl):
         self.prefix_cache_configuration.dataType = kv_cache_device_data_type
         self.prefix_cache_configuration.numTokensPerBlock = cache_config.block_size
         self.prefix_cache_configuration.maxNumBlocksPerSequence = (
-            self.rotary_embedding.rotaryEmbeddingMaxPositions // cache_config.block_size
-        )
+            self.rotary_embedding.rotaryEmbeddingMaxPositions //
+            cache_config.block_size)
         self.prefix_cache_configuration.blockOffsetLayout = BlockOffsetLayout.VLLM
 
         # Internal quantity used to size the kv-cache TMA descriptor.
@@ -370,7 +364,8 @@ class TkeImpl(AttentionImpl):
                 dtype=torch.int32,
                 requires_grad=False,
             ).contiguous()
-        self.multi_block_semaphores = _MULTI_BLOCK_SEMAPHORES[(num_heads, max_num_seqs)]
+        self.multi_block_semaphores = _MULTI_BLOCK_SEMAPHORES[(num_heads,
+                                                               max_num_seqs)]
 
         # Create a representation of the fixed parameters of the attention operation.
         self.op = create_op(
@@ -418,10 +413,10 @@ class TkeImpl(AttentionImpl):
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
-                "Encoder self-attention is not implemented for TKE."
-            )
+                "Encoder self-attention is not implemented for TKE.")
 
-    def _setup_rope(self, rotary_embedding_config: RotaryEmbeddingConfig) -> None:
+    def _setup_rope(self,
+                    rotary_embedding_config: RotaryEmbeddingConfig) -> None:
         # Create cache key for rotary cos/sin tensor. Crucially, frozen dataclass, which is hashable.
         cache_key = rotary_embedding_config
         self.rotary_embedding = RotaryEmbedding()
@@ -430,8 +425,7 @@ class TkeImpl(AttentionImpl):
             case SimpleRotaryEmbedding() as simple_rope:
                 self.rotary_embedding.rotaryEmbeddingBase = simple_rope.base
                 self.rotary_embedding.rotaryEmbeddingMaxPositions = (
-                    simple_rope.max_positions
-                )
+                    simple_rope.max_positions)
                 self.rotary_embedding.rotaryEmbeddingDim = simple_rope.dimension
                 self.rotary_embedding.rotaryEmbeddingScale = 1.0
                 self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE
@@ -445,8 +439,7 @@ class TkeImpl(AttentionImpl):
                             self.rotary_embedding.rotaryEmbeddingMaxPositions,
                             self.rotary_embedding.rotaryEmbeddingDim,
                             self.rotary_embedding.rotaryEmbeddingBase,
-                        )
-                    )
+                        ))
                     self.rotary_cos_sin = torch.tensor(
                         self.rotary_cos_sin_ndarray,
                         dtype=torch.float32,
@@ -454,20 +447,17 @@ class TkeImpl(AttentionImpl):
                         requires_grad=False,
                     )
                     _ROPE_COEFF_CACHE[cache_key] = self.rotary_cos_sin
-                self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr()
+                self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
+                )
             case YarnRotaryEmbeddingConfig() as yarn_rope:
                 self.rotary_embedding.rotaryEmbeddingBase = (
-                    yarn_rope.rotary_embedding_config.base
-                )
+                    yarn_rope.rotary_embedding_config.base)
                 self.rotary_embedding.rotaryEmbeddingMaxPositions = (
-                    yarn_rope.yarn_scaling_config.extended_max_positions
-                )
+                    yarn_rope.yarn_scaling_config.extended_max_positions)
                 self.rotary_embedding.rotaryEmbeddingDim = (
-                    yarn_rope.rotary_embedding_config.dimension
-                )
+                    yarn_rope.rotary_embedding_config.dimension)
                 self.rotary_embedding.rotaryEmbeddingScale = (
-                    yarn_rope.yarn_scaling_config.scaling_factor
-                )
+                    yarn_rope.yarn_scaling_config.scaling_factor)
                 self.rotary_embedding.rotaryScalingType = RotaryScalingType.YARN
                 self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
 
@@ -479,7 +469,8 @@ class TkeImpl(AttentionImpl):
                         yarn_rope.rotary_embedding_config.dimension,
                         yarn_rope.rotary_embedding_config.base,
                         yarn_rope.yarn_scaling_config.scaling_factor,
-                        original_max_position_embeddings=yarn_rope.rotary_embedding_config.max_positions,
+                        original_max_position_embeddings=yarn_rope.
+                        rotary_embedding_config.max_positions,
                         beta_fast=yarn_rope.yarn_scaling_config.beta_fast,
                         beta_slow=yarn_rope.yarn_scaling_config.beta_slow,
                     )
@@ -490,7 +481,8 @@ class TkeImpl(AttentionImpl):
                         requires_grad=False,
                     )
                     _ROPE_COEFF_CACHE[cache_key] = self.rotary_cos_sin
-                self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr()
+                self.rotary_embedding.rotaryCosSinCache = self.rotary_cos_sin.data_ptr(
+                )
             case _:
                 raise NotImplementedError(
                     f"The TKE backend does not support RoPE configured with a {type(rotary_embedding_config)}"
@@ -543,10 +535,13 @@ class TkeImpl(AttentionImpl):
                 numContextSequences=attn_metadata.num_context_sequences,
                 numContextTokens=attn_metadata.num_context_tokens,
                 maxSequenceLength=attn_metadata.context_max_sequence_length,
-                tokenOffset=attn_metadata.num_generation_tokens,  # Generation or decode tokens come first in the batch.
+                tokenOffset=attn_metadata.
+                num_generation_tokens,  # Generation or decode tokens come first in the batch.
                 qkv=query,
-                sequenceLengthsDevice=attn_metadata.context_sequence_lengths_device,
-                inputSequenceLengthsDevice=attn_metadata.context_input_sequence_lengths_device,
+                sequenceLengthsDevice=attn_metadata.
+                context_sequence_lengths_device,
+                inputSequenceLengthsDevice=attn_metadata.
+                context_input_sequence_lengths_device,
                 kvCacheBlockOffsets=attn_metadata.context_block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
@@ -563,12 +558,16 @@ class TkeImpl(AttentionImpl):
                 numGenerationSequences=attn_metadata.num_generation_sequences,
                 numGenerationTokens=attn_metadata.num_generation_tokens,
                 maxSequenceLength=attn_metadata.generation_max_sequence_length,
-                maxInputSequenceLength=attn_metadata.generation_max_input_sequence_length,
-                tokenOffset=0,  # Generation or decode tokens come first in the batch.
+                maxInputSequenceLength=attn_metadata.
+                generation_max_input_sequence_length,
+                tokenOffset=
+                0,  # Generation or decode tokens come first in the batch.
                 qkv=query,
-                sequenceLengthsDevice=attn_metadata.common_attn_metadata.seq_lens,
+                sequenceLengthsDevice=attn_metadata.common_attn_metadata.
+                seq_lens,
                 inputSequenceLengthsDevice=attn_metadata.query_lens,
-                kvCacheBlockOffsets=attn_metadata.common_attn_metadata.block_table_tensor,
+                kvCacheBlockOffsets=attn_metadata.common_attn_metadata.
+                block_table_tensor,
                 kvCachePoolPtr=kv_cache.data_ptr(),
                 rotaryEmbedding=self.rotary_embedding,
                 inputScales=self.input_scales,
@@ -587,7 +586,7 @@ def create_rope_coefficient_cache_for_simple_rope(
     theta: float,
     dtype=np.float32,
 ) -> np.ndarray:
-    inv_freq = 1.0 / (theta ** (np.arange(0, dim, 2) / dim)).astype(dtype)
+    inv_freq = 1.0 / (theta**(np.arange(0, dim, 2) / dim)).astype(dtype)
     sinusoid_inp = np.expand_dims(
         np.einsum(
             "i , j -> i j",
@@ -598,7 +597,8 @@ def create_rope_coefficient_cache_for_simple_rope(
         axis=-1,
     )
     # fuse cos/sin into float2 (cos, sin).
-    concat = np.concatenate((np.cos(sinusoid_inp), np.sin(sinusoid_inp)), axis=-1)
+    concat = np.concatenate((np.cos(sinusoid_inp), np.sin(sinusoid_inp)),
+                            axis=-1)
 
     return concat.astype(dtype).reshape(num_pos, dim)
 
@@ -616,21 +616,21 @@ def create_sinusoidal_positions_yarn(
 ) -> np.ndarray:
     # Copy from https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/modeling_deepseek.py
     # Inverse dim formula to find dim based on number of rotations
-    def yarn_find_correction_dim(num_rotations, dim, base, max_position_embeddings):
-        return (
-            dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))
-        ) / (2 * math.log(base))
+    def yarn_find_correction_dim(num_rotations, dim, base,
+                                 max_position_embeddings):
+        return (dim *
+                math.log(max_position_embeddings /
+                         (num_rotations * 2 * math.pi))) / (2 * math.log(base))
 
     # Find dim range bounds based on rotations
-    def yarn_find_correction_range(
-        low_rot, high_rot, dim, base, max_position_embeddings
-    ):
+    def yarn_find_correction_range(low_rot, high_rot, dim, base,
+                                   max_position_embeddings):
         low = math.floor(
-            yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings)
-        )
+            yarn_find_correction_dim(low_rot, dim, base,
+                                     max_position_embeddings))
         high = math.ceil(
-            yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings)
-        )
+            yarn_find_correction_dim(high_rot, dim, base,
+                                     max_position_embeddings))
         if low < 0:
             low = 0
         if high > dim - 1:
@@ -641,11 +641,13 @@ def create_sinusoidal_positions_yarn(
         if min == max:
             max += 0.001  # Prevent singularity
 
-        linear_func = (torch.arange(dim, dtype=dtype, device="cpu") - min) / (max - min)
+        linear_func = (torch.arange(dim, dtype=dtype, device="cpu") -
+                       min) / (max - min)
         ramp_func = torch.clamp(linear_func, 0, 1)
         return ramp_func
 
-    pos_freqs = base ** (torch.arange(0, dim, 2, dtype=dtype, device="cpu") / dim)
+    pos_freqs = base**(torch.arange(0, dim, 2, dtype=dtype, device="cpu") /
+                       dim)
     freq_extra = 1.0 / pos_freqs
     freq_inter = 1.0 / (scaling_factor * pos_freqs)
 
@@ -664,6 +666,6 @@ def create_sinusoidal_positions_yarn(
     _mscale = float(yarn_get_mscale(scaling_factor))
 
     concat = torch.cat(
-        (torch.cos(sinusoid_inp) * _mscale, torch.sin(sinusoid_inp) * _mscale), dim=-1
-    )
+        (torch.cos(sinusoid_inp) * _mscale, torch.sin(sinusoid_inp) * _mscale),
+        dim=-1)
     return concat.reshape((1, -1)).to(dtype).numpy()

@@ -118,6 +118,10 @@ def create_common_attn_metadata(
     )
 
 
+# _Backend.TKE:
+# "vllm.v1.attention.backends.tke.TkeAttentionBackend",
+
+
 def try_get_attention_backend(
     backend: AttentionBackendEnum,
 ) -> tuple[type[AttentionMetadataBuilder], type[AttentionImpl]]:
