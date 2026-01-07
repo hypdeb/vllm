@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    InputLayout,
     MultipleOf,
 )
 from vllm.attention.ops.triton_prefill_attention import context_attention_fwd
@@ -336,6 +337,18 @@ class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 
 class TritonAttentionImpl(AttentionImpl):

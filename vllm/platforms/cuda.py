@@ -79,6 +79,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TKE,
             ]
 
 

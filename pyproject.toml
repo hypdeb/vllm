@@ -51,6 +51,9 @@ lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:regi
 where = ["."]
 include = ["vllm*"]
 
+[tool.ruff]
+line-length = 88
+
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]

@@ -6,11 +6,13 @@ from typing import cast
 
 import torch
 import torch.nn as nn
+from attrs import inspect
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionType,
+    InputLayout,
     MLAAttentionImpl,
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -32,6 +34,9 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.rotary_embedding.abstractions import (
+    RotaryEmbeddingConfig,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
@@ -143,6 +148,11 @@ def _init_kv_cache_quant(
         layer.quant_method.create_weights(layer)
 
 
+def _constructor_has_arg(cls: type, arg_name: str) -> bool:
+    sig = inspect.signature(cls.__init__)  # type: ignore
+    return arg_name in sig.parameters
+
+
 class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
@@ -166,6 +176,7 @@ class Attention(nn.Module, AttentionLayerBase):
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
+        rope_config: RotaryEmbeddingConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
@@ -263,6 +274,34 @@ class Attention(nn.Module, AttentionLayerBase):
             cache_config.enable_prefix_caching = False
 
         impl_cls = self.attn_backend.get_impl_cls()
+
+        # When the backend applies RoPE, we need to pass
+        # the RoPE parameters to the backend implementation.
+        if self.attn_backend.get_backend_applies_rotary_embedding():
+            if rope_config is None:
+                raise RuntimeError(
+                    "If the attention backend has fused RoPE,"
+                    "a rope_config must be provided."
+                )
+            extra_impl_args["rotary_embedding_config"] = rope_config
+
+        # If the backend implementation constructor requires
+        # the configuration of the cache, pass it.
+        if _constructor_has_arg(impl_cls, "cache_config"):
+            extra_impl_args["cache_config"] = cache_config
+
+        # Same for speculative decoding.
+        if _constructor_has_arg(impl_cls, "speculative_decoding_config"):
+            extra_impl_args["speculative_decoding_config"] = (
+                get_current_vllm_config().speculative_config
+            )
+
+        # Same for scheduler config.
+        if _constructor_has_arg(impl_cls, "scheduler_config"):
+            extra_impl_args["scheduler_config"] = (
+                get_current_vllm_config().scheduler_config
+            )
+
         self.impl = impl_cls(
             num_heads,
             head_size,
@@ -356,25 +395,42 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
-            if output_shape is None:
-                # Handle both 2D [num_tokens, hidden] and
-                # 3D [num_tokens, heads, head_dim] query
-                num_tokens = query.shape[0]
-                output_shape = torch.Size(
-                    (num_tokens, self.num_heads * self.head_size_v)
+            if self.attn_backend.get_input_layout() == InputLayout.CONTIGUOUS_QKV:
+                q_dimension = self.head_size * self.num_heads
+                output_shape = (
+                    output_shape
+                    if output_shape is not None
+                    else (query.shape[0], q_dimension)
                 )
-            output_shape = output_shape if output_shape is not None else query.shape
-            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
-            hidden_size = output_shape[-1]
-            # Reshape the query, key, and value tensors.
-            # NOTE(woosuk): We do this outside the custom op to minimize the
-            # CPU overheads from the non-CUDA-graph regions.
-            query = query.view(-1, self.num_heads, self.head_size)
-            output = output.view(-1, self.num_heads, self.head_size_v)
-            if key is not None:
-                key = key.view(-1, self.num_kv_heads, self.head_size)
-            if value is not None:
-                value = value.view(-1, self.num_kv_heads, self.head_size_v)
+                output = torch.zeros(
+                    output_shape,
+                    dtype=self.attn_backend.get_output_dtype(self.kv_cache_dtype),
+                    device=query.device,
+                )
+                key = None  # type: ignore
+                value = None  # type: ignore
+            elif self.attn_backend.get_input_layout() == InputLayout.SPLIT_QKV:
+                if output_shape is None:
+                    # Handle both 2D [num_tokens, hidden] and
+                    # 3D [num_tokens, heads, head_dim] query
+                    num_tokens = query.shape[0]
+                    output_shape = torch.Size(
+                        (num_tokens, self.num_heads * self.head_size_v)
+                    )
+                output_shape = output_shape if output_shape is not None else query.shape
+                output = torch.empty(
+                    output_shape, dtype=output_dtype, device=query.device
+                )
+                hidden_size = output_shape[-1]
+                # Reshape the query, key, and value tensors.
+                # NOTE(woosuk): We do this outside the custom op to minimize the
+                # CPU overheads from the non-CUDA-graph regions.
+                query = query.view(-1, self.num_heads, self.head_size)
+                output = output.view(-1, self.num_heads, self.head_size_v)
+                if key is not None:
+                    key = key.view(-1, self.num_kv_heads, self.head_size)
+                if value is not None:
+                    value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
@@ -382,13 +438,23 @@ class Attention(nn.Module, AttentionLayerBase):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata, output=output
+                    self,
+                    query,
+                    key,
+                    value,
+                    self_kv_cache,
+                    attn_metadata,
+                    output=output,
                 )
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name
                 )
-            return output.view(-1, hidden_size)
+
+            if self.attn_backend.get_output_dtype() != torch.bfloat16:
+                return output.view(-1, hidden_size).to(torch.bfloat16)
+            else:
+                return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()

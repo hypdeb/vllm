@@ -13,6 +13,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    InputLayout,
     MultipleOf,
     is_quantized_kv_cache,
 )
@@ -176,6 +177,18 @@ class FlashAttentionBackend(AttentionBackend):
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         return None
+
+    @staticmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        return torch.bfloat16
+
+    @staticmethod
+    def get_input_layout() -> InputLayout:
+        return InputLayout.SPLIT_QKV
+
+    @staticmethod
+    def get_backend_applies_rotary_embedding() -> bool:
+        return False
 
 
 @dataclass

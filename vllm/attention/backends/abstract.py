@@ -15,6 +15,24 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
+class InputLayout(Enum):
+    """
+    The types of query, key, value layouts for the attention operation.
+    Different implementations might require different layouts.
+    """
+
+    # The default vLLM attention input layout where the query,
+    # keys and values are provided separately as tensors with
+    # [num_tokens, num_heads * head_size], [num_tokens, num_kv_heads * head_size],
+    # and [num_tokens, num_kv_heads * head_size] respectively.
+    SPLIT_QKV = "split_qkv"
+
+    # An input layout where the query, keys and values are provided
+    # as a single tensor of dimensions
+    # [num_tokens, (num_heads + 2*num_kv_heads) * head_size].
+    CONTIGUOUS_QKV = "contiguous_qkv"
+
+
 class AttentionType(str, Enum):
     """
     Attention type.
@@ -76,6 +94,21 @@ class AttentionBackend(ABC):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_input_layout() -> InputLayout:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_backend_applies_rotary_embedding() -> bool:
         raise NotImplementedError
 
     @staticmethod
