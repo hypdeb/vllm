@@ -12,4 +12,4 @@ torchvision==0.24.1 # Required for phi3v processor. See https://github.com/pytor
 # FlashInfer should be updated together with the Dockerfile
 flashinfer-python==0.5.3
 
-git+https://gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@a977a967f777fc71efcebd6a5b0387ff9d09eee5
+trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@a977a967f777fc71efcebd6a5b0387ff9d09eee5

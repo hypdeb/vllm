@@ -67,7 +67,7 @@ _WORKSPACE: tuple[int, torch.Tensor] | None = None
 _MULTI_BLOCK_SEMAPHORES: dict[tuple, torch.Tensor] = {}
 
 
-class TkeAttentionBackend(AttentionBackend):
+class TKEAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -104,6 +104,7 @@ class TkeAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
@@ -116,8 +117,8 @@ class TkeAttentionBackend(AttentionBackend):
         return (0, 1, 3, 2, 4)
 
     @staticmethod
-    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
-        if kv_cache_dtype == "fp8" or kv_cache_dtype == "fp8_e4m3":
+    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
+        if kv_cache_dtype == torch.float8_e4m3fn:
             return torch.float8_e4m3fn
         return torch.bfloat16
 

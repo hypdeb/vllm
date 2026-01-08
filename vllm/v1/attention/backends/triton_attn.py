@@ -339,7 +339,7 @@ class TritonAttentionBackend(AttentionBackend):
         return True
 
     @staticmethod
-    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
         return torch.bfloat16
 
     @staticmethod

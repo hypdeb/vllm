@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
+import inspect
 from typing import cast
 
 import torch
 import torch.nn as nn
-from attrs import inspect
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (
@@ -402,9 +402,10 @@ class Attention(nn.Module, AttentionLayerBase):
                     if output_shape is not None
                     else (query.shape[0], q_dimension)
                 )
+                hidden_size = q_dimension
                 output = torch.zeros(
                     output_shape,
-                    dtype=self.attn_backend.get_output_dtype(self.kv_cache_dtype),
+                    dtype=self.attn_backend.get_output_dtype(self.kv_cache_torch_dtype),
                     device=query.device,
                 )
                 key = None  # type: ignore
@@ -418,10 +419,10 @@ class Attention(nn.Module, AttentionLayerBase):
                         (num_tokens, self.num_heads * self.head_size_v)
                     )
                 output_shape = output_shape if output_shape is not None else query.shape
+                hidden_size = output_shape[-1]
                 output = torch.empty(
                     output_shape, dtype=output_dtype, device=query.device
                 )
-                hidden_size = output_shape[-1]
                 # Reshape the query, key, and value tensors.
                 # NOTE(woosuk): We do this outside the custom op to minimize the
                 # CPU overheads from the non-CUDA-graph regions.
@@ -451,7 +452,10 @@ class Attention(nn.Module, AttentionLayerBase):
                     query, key, value, output, self.layer_name
                 )
 
-            if self.attn_backend.get_output_dtype() != torch.bfloat16:
+            if (
+                self.attn_backend.get_output_dtype(self.kv_cache_dtype)
+                != torch.bfloat16
+            ):
                 return output.view(-1, hidden_size).to(torch.bfloat16)
             else:
                 return output.view(-1, hidden_size)

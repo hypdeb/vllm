@@ -228,13 +228,6 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.backend_applies_rotary_embedding = (
-            self.attn.attn_backend.get_backend_applies_rotary_embedding()
-        )
-
-        if not self.backend_applies_rotary_embedding:
-            self._init_rotary_emb(config, quant_config=quant_config)
-
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
             # Fix for Eagle3 compatibility:
@@ -262,6 +255,7 @@ class LlamaAttention(nn.Module):
             else Attention
         )
 
+        self._init_rotary_emb(config, quant_config=quant_config)
         rope_config = _parse_rope_config(self.rotary_emb, head_dim)
         self.attn = attn_cls(
             self.num_heads,
@@ -276,10 +270,11 @@ class LlamaAttention(nn.Module):
             rope_config=rope_config,
         )
 
-        self.input_layout = self.attn.attn_backend.get_input_layout()
         self.backend_applies_rotary_embedding = (
             self.attn.attn_backend.get_backend_applies_rotary_embedding()
         )
+
+        self.input_layout = self.attn.attn_backend.get_input_layout()
 
     def _get_llama_4_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         # Llama4 scaling
