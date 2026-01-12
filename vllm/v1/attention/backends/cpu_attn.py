@@ -83,7 +83,7 @@ class CPUAttentionBackend(AttentionBackend):
         return False
 
     @staticmethod
-    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
         return torch.bfloat16
 
     @staticmethod

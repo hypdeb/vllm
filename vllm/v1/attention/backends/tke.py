@@ -117,10 +117,15 @@ class TKEAttentionBackend(AttentionBackend):
         return (0, 1, 3, 2, 4)
 
     @staticmethod
-    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
-        if kv_cache_dtype == torch.float8_e4m3fn:
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
+        # The dtypes are such a mess...
+        if kv_cache_dtype == "fp8_e4m3":
             return torch.float8_e4m3fn
-        return torch.bfloat16
+        if kv_cache_dtype == "fp8":
+            return torch.float8_e4m3fn
+        if kv_cache_dtype == "auto":
+            return torch.bfloat16
+        raise RuntimeError(f"Unsupported kv_cache_dtype: {kv_cache_dtype}")
 
     @staticmethod
     def get_input_layout() -> InputLayout:
@@ -337,16 +342,6 @@ class TkeImpl(AttentionImpl):
 
         kv_cache_device_data_type = _str_to_device_data_type(kv_cache_dtype)
 
-        # FIXME: handle this in TKE instead.
-        if kv_cache_device_data_type == DeviceDataType.BF16:
-            self.input_scales = InputScales()
-            self.input_scales.qScale = 1.0
-            self.input_scales.qScaleDevice = self.dummy_scale.data_ptr()
-            self.input_scales.kScale = 1.0
-            self.input_scales.kScaleDevice = self.dummy_scale.data_ptr()
-            self.input_scales.vScale = 1.0
-            self.input_scales.vScaleDevice = self.dummy_scale.data_ptr()
-
         # Extract the dimensions of the attention layer.
         self.attention_layer_dimensions = AttentionLayerDimensions()
         self.attention_layer_dimensions.numQHeads = num_heads
@@ -557,9 +552,6 @@ class TkeImpl(AttentionImpl):
             self.input_scales.vScale = layer._v_scale_float
             self.input_scales.vScaleDevice = layer._v_scale.data_ptr()
 
-        # NOTE: we have removed all calls to tensor slicing and viewing
-        # from this function intentionally, at the cost of
-        # making the API of TKE a bit more complex.
         cuda_stream = current_stream()
 
         if attn_metadata.num_context_sequences > 0:

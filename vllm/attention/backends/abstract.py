@@ -98,7 +98,7 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_output_dtype(kv_cache_dtype: torch.dtype) -> torch.dtype:
+    def get_output_dtype(kv_cache_dtype: str) -> torch.dtype:
         raise NotImplementedError
 
     @staticmethod

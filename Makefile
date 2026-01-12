@@ -19,10 +19,23 @@ install:
 		--prerelease=allow \
 		--index-strategy unsafe-best-match \
 		--extra-index-url https://download.pytorch.org/whl/cu129
+	. .venv/bin/activate && uv pip install nvidia-lm-eval math_verify
+
+serve:
+	vllm serve $(WEIGHTS_PATH) \
+	--tensor-parallel-size $(TP_SIZE) \
+	$(MISTRAL_ARGS) \
+	$(SHARED_ARGS)
+
+serve-fp8:
+	vllm serve $(WEIGHTS_PATH) \
+	--tensor-parallel-size $(TP_SIZE) \
+	$(MISTRAL_ARGS) \
+	$(SHARED_ARGS) \
+	--kv-cache-dtype fp8
 
 serve-tke:
 	vllm serve $(WEIGHTS_PATH) \
-	--enforce-eager \
 	--attention-config.backend TKE \
 	--tensor-parallel-size $(TP_SIZE) \
 	$(MISTRAL_ARGS) \
@@ -35,3 +48,22 @@ serve-tke-fp8:
 	$(MISTRAL_ARGS) \
 	$(SHARED_ARGS) \
 	--kv-cache-dtype fp8
+
+eval-gsm8k:
+	nemo-evaluator run_eval \
+		--eval_type gsm8k \
+		--model_id default_model \
+		--model_url http://localhost:8000/v1/completions \
+		--model_type completions \
+		--output_dir ./ \
+		--override config.params.parallelism=1
+
+query-completion:
+	curl http://localhost:8000/v1/completions \
+	    -H "Content-Type: application/json" \
+	    -d '{"model": "default_model", "prompt": "What is the capital of France?", "max_tokens": 128, "temperature": 0}'
+
+query-chat:
+	curl -X POST http://localhost:8000/v1/chat/completions \
+	-H "Content-Type: application/json" \
+	-d '{"messages": [{"role": "user", "content": "What is the capital of France?"}], "max_tokens": 256, "model": "default_model"}'

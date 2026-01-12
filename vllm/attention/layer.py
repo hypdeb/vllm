@@ -405,7 +405,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 hidden_size = q_dimension
                 output = torch.zeros(
                     output_shape,
-                    dtype=self.attn_backend.get_output_dtype(self.kv_cache_torch_dtype),
+                    dtype=self.attn_backend.get_output_dtype(self.kv_cache_dtype),
                     device=query.device,
                 )
                 key = None  # type: ignore
