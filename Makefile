@@ -6,6 +6,14 @@ TP_SIZE := 4
 SHARED_ARGS := --no-enable-prefix-caching --served-model-name default_model
 MISTRAL_ARGS := --config-format mistral --load-format mistral --tokenizer-mode mistral
 
+cuda-deps:
+	sudo apt-get update && sudo apt-get install -y \
+		cuda-nvrtc-dev-12-9 \
+		libcublas-dev-12-9 \
+		libcusparse-dev-12-9 \
+		libcusolver-dev-12-9 \
+		ccache
+		
 install:
 	python3 -m venv .venv
 	. .venv/bin/activate && pip install uv
