@@ -11,11 +11,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_all2all_prepare_finalize import (  # noqa: E501
+    create_flashinfer_cutlass_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
@@ -136,8 +136,6 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
     global_num_experts: int,
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
-    from flashinfer.fused_moe import RoutingMethodType
-
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from vllm.model_executor.models.llama4 import Llama4MoE
 
@@ -175,7 +173,7 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         use_routing_scales_on_input=apply_router_weight_on_input,
-        routing_method_type=RoutingMethodType.Llama4,
+        routing_method_type=layer.routing_method_type,
     )
 
 
@@ -198,7 +196,7 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
     # Propagate block-scale flag so prepare/finalize can skip act quantization
     # and inform the kernel to consume per-block weight scales.
-    return create_flashinfer_prepare_finalize(
+    return create_flashinfer_cutlass_prepare_finalize(
         use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
     )
 
