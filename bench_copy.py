@@ -3,8 +3,8 @@ import sys
 import torch
 
 def _concat_k_nope_k_pe(
-    k_nope: torch.Tensor, k_pe: torch.Tensor
-) -> torch.Tensor:
+    k_nope: torch.Tensor, k_pe: torch.Tensor, k: torch.Tensor
+):
     """
     Efficiently concatenate k_nope and k_pe tensors along the last dimension.
 
@@ -19,15 +19,10 @@ def _concat_k_nope_k_pe(
     Returns:
         Tensor of shape [..., nope_dim + pe_dim]
     """
-    k = torch.empty(
-        (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
-        dtype=k_nope.dtype,
-        device=k_nope.device,
-    )
+
     # Direct copies with efficient broadcasting
     k[..., : k_nope.shape[-1]] = k_nope
     k[..., k_nope.shape[-1] :] = k_pe
-    return k
 
 def main() -> int:
     return 0
@@ -42,22 +37,28 @@ if __name__ == "__main__":
     k_nope = torch.randn((num_tokens, num_heads, k_head_dim), device="cuda").to(torch.bfloat16)
     k_pe = torch.randn((num_tokens, num_heads, k_head_dim - rope_dim), device="cuda").to(torch.bfloat16)
 
+    k = torch.empty(
+        (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
+        dtype=k_nope.dtype,
+        device=k_nope.device,
+    )
+
     # Warmup
-    k = _concat_k_nope_k_pe(k_nope, k_pe)
+    _concat_k_nope_k_pe(k_nope, k_pe, k)
     torch.cuda.synchronize()
 
     # Capture CUDA graph
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         # Warmup in capture stream
-        k = _concat_k_nope_k_pe(k_nope, k_pe)
+        _concat_k_nope_k_pe(k_nope, k_pe, k)
     torch.cuda.synchronize()
 
     # Capture the graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for _ in range(num_iterations):
-            k = _concat_k_nope_k_pe(k_nope, k_pe)
+            _concat_k_nope_k_pe(k_nope, k_pe, k)
 
     # Benchmark the graph replay
     torch.cuda.synchronize()
