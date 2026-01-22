@@ -36,6 +36,7 @@ cuda-deps:
 		ccache
 
 install:
+	python3 -m pip uninstall -y vllm
 	python3 -m venv .venv
 	. .venv/bin/activate && pip install uv
 	. .venv/bin/activate && uv pip install -r requirements/build.txt
@@ -49,6 +50,7 @@ install:
 		--index-strategy unsafe-best-match \
 		--extra-index-url https://download.pytorch.org/whl/cu129
 	. .venv/bin/activate && uv pip install nvidia-lm-eval math_verify nvtx
+	# CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST="9.0" bash vllm/tools/ep_kernels/install_eep_libraries.sh
 
 serve:
 	vllm serve $(WEIGHTS_PATH) \
