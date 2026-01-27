@@ -28,7 +28,6 @@ from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import numpy as np
-from datasets import Dataset
 from PIL import Image
 from typing_extensions import deprecated
 
@@ -46,7 +45,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
-    from datasets import load_dataset
+    from datasets import Dataset, load_dataset
 except ImportError:
     datasets = PlaceholderModule("datasets")
     load_dataset = datasets.placeholder_attr("load_dataset")
