@@ -67,7 +67,7 @@ class PydanticMagicMock(MagicMock):
         return core_schema.any_schema()
 
 
-def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
+def auto_mock(module_name: str, attr: str, max_mocks: int = 200):
     """Function that automatically mocks missing modules during imports."""
     logger.info("Importing %s from %s", attr, module_name)
 

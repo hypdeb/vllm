@@ -10,6 +10,7 @@ generation. Supported dataset types include:
   - BurstGPT
   - HuggingFace
   - VisionArena
+  - TxtSlices
 """
 
 import argparse
@@ -963,6 +964,10 @@ class RandomMultiModalDataset(RandomDataset):
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
     ) -> list[SampleRequest]:
+        if batchsize != 1:
+            raise NotImplementedError(
+                "batchsize > 1 is not supported for RandomMultiModalDataset."
+            )
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
@@ -2009,7 +2014,18 @@ class SpecBench(CustomDataset):
         **kwargs,
     ) -> list[SampleRequest]:
         # leverage CustomDataset sample
-        return super().sample(**kwargs)
+        return super().sample(
+            tokenizer,
+            num_requests,
+            request_id_prefix=request_id_prefix,
+            no_oversample=no_oversample,
+            lora_path=lora_path,
+            max_loras=max_loras,
+            output_len=output_len,
+            enable_multimodal_chat=enable_multimodal_chat,
+            skip_chat_template=skip_chat_template,
+            **kwargs,
+        )
 
 
 # -----------------------------------------------------------------------------

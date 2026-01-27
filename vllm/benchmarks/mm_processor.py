@@ -31,6 +31,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.multimodal.processing.context import (
     get_timing_stats_from_engine_client,
 )
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -291,7 +292,7 @@ def benchmark_multimodal_processor(
     return benchmark_result
 
 
-def add_cli_args(parser: argparse.ArgumentParser) -> None:
+def add_cli_args(parser: FlexibleArgumentParser) -> None:
     """Add CLI arguments for the multimodal processor benchmark."""
     from vllm.engine.arg_utils import EngineArgs
 
