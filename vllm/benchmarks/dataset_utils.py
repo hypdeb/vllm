@@ -82,6 +82,7 @@ def get_random_lora_request(
     )
     return lora_request
 
+
 def apply_multimodal_chat_transformation(
     prompt: str,
     mm_content: MultiModalDataDict | dict | list[dict] | None = None,
@@ -102,6 +103,7 @@ def apply_multimodal_chat_transformation(
                 f"Could not process multimodal content of type: {type(mm_content)}"
             )
     return [{"role": "user", "content": content}]
+
 
 def process_image(image: Any) -> Mapping[str, Any]:
     """
