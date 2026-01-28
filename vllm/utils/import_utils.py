@@ -114,7 +114,16 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
 
 @cache
 def get_vllm_optional_dependencies():
-    metadata = importlib.metadata.metadata("vllm")
+    try:
+        metadata = importlib.metadata.metadata("vllm")
+    except importlib.metadata.PackageNotFoundError:
+        logger.info(
+            "Could not find vllm package metadata."
+            "This could be expected if vLLM is not "
+            "expected to be installed, "
+            "for example while generating the documentation."
+        )
+        return {}
     requirements = metadata.get_all("Requires-Dist", [])
     extras = metadata.get_all("Provides-Extra", [])
 
