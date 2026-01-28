@@ -49,6 +49,7 @@ try:
 except ImportError:
     datasets = PlaceholderModule("datasets")
     load_dataset = datasets.placeholder_attr("load_dataset")
+    Dataset = datasets.placeholder_attr("Dataset")
 
 try:
     import pandas as pd
