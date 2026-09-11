@@ -726,6 +726,7 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -759,5 +760,11 @@ def make_fp8_moe_kernel(
         prepare_finalize,
         experts,
     )
+
+    # TRTLLM per-tensor FP8 registers per-expert alpha params on the layer so
+    # EPLB rearranges them alongside the experts. Guarded to trtllm: other
+    # backends' hooks may perform in-place scale updates that must not run here.
+    if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and layer is not None:
+        experts.process_weights_after_loading(layer)
 
     return kernel

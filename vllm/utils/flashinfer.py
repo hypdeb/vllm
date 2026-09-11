@@ -321,6 +321,28 @@ def has_flashinfer_nvlink_one_sided() -> bool:
 
 
 @functools.cache
+def has_flashinfer_gin() -> bool:
+    """Return ``True`` when FlashInfer's JIT-only GIN backend is available."""
+    if not has_flashinfer_comm():
+        return False
+    # GIN is not shipped by flashinfer-cubin: it always builds against the
+    # NCCL device API selected by the local deployment.
+    if shutil.which("nvcc") is None:
+        logger.debug_once("FlashInfer GIN unavailable since nvcc was not found")
+        return False
+    if importlib.util.find_spec("flashinfer.comm.gin_moe_alltoall") is None:
+        return False
+    comm = _get_submodule("flashinfer.comm")
+    return bool(
+        comm
+        and hasattr(comm, "GinMoeAlltoAll")
+        and hasattr(comm.GinMoeAlltoAll, "preload")
+        and hasattr(comm.GinMoeAlltoAll, "allocate_recv_views")
+        and hasattr(comm, "gin_moe_get_unique_id")
+    )
+
+
+@functools.cache
 def has_flashinfer_moe() -> bool:
     """Return `True` if FlashInfer MoE module is available."""
     return (

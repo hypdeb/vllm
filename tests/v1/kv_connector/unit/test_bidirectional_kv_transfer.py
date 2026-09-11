@@ -1050,15 +1050,19 @@ def test_handshake_listener_appends_perf_counter_frame():
     stop_event = threading.Event()
     host = "127.0.0.1"
     port = get_open_port()
+    scheduler = object.__new__(NixlBaseConnectorScheduler)
+    scheduler.side_channel_host = host
+    scheduler.side_channel_port = port
+    scheduler._listener_error = None
     listener = threading.Thread(
-        target=NixlBaseConnectorScheduler._nixl_handshake_listener,
-        args=(encoded_data, ready_event, stop_event, host, port),
+        target=scheduler._nixl_handshake_listener,
+        args=(encoded_data, ready_event, stop_event),
         daemon=True,
     )
     listener.start()
     try:
         assert ready_event.wait(timeout=5)
-        path = make_zmq_path("tcp", host, port)
+        path = make_zmq_path("tcp", host, scheduler.side_channel_port)
         with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
             sock.setsockopt(zmq.RCVTIMEO, 5000)  # type: ignore[attr-defined]
             t0 = time.perf_counter()
